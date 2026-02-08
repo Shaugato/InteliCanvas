@@ -1,0 +1,176 @@
+PHASE 2.1 — Polish pass: Manual Console UX (named steps, no auto-apply by default) + “real picture” sky gradient & richer color/stroke styling.
+
+HARD GUARDRAILS
+- Client-only changes under client/src/**
+- DO NOT modify /shared/** or /server/**
+- DO NOT change schemas/contracts/commands
+- Keep determinism: SceneGraph -> render only (no hidden drawing state)
+
+GOALS
+1) Manual Console UX
+- Replace numeric demo buttons (1,2,3…) with readable names from demoSteps[].name
+- Clicking a demo step should LOAD the JSON into the textarea (not apply) by default
+- Add a toggle: “Auto-apply demo steps” (default OFF). If ON, clicking step loads + applies
+- “Next Step” respects the same behavior (loads next step; applies only if toggle ON)
+- Validate / Apply / Clear must work reliably:
+  - Validate: Zod-validate textarea JSON, show detailed errors, no apply
+  - Apply: applyEnvelope(textarea JSON), show success/failure
+  - Clear: clear textarea + clear messages only (does NOT reset scene)
+  - Reset Scene: resets scene to initial empty scene and clears last envelope/messages
+
+2) Sky gradient + nicer “reference-like” coloring (no schema changes)
+- Implement sky gradient purely in renderer (Konva Rect gradient) for the sky object
+- Add subtle “sunset band” near horizon (very low opacity)
+- Improve mountains/field/path/tree/house strokes/shadows slightly for a more “real” look while still using primitives only
+
+────────────────────────────────────────────────────────
+A) Manual Console changes (client/src/components/ManualConsole.vue)
+────────────────────────────────────────────────────────
+Current issue:
+- Demo step buttons auto-apply, making Validate/Apply/Clear feel broken/useless.
+
+Fix behavior:
+1) Render step buttons using demoSteps array:
+   - show demoSteps[i].name (e.g. “Sky”, “Sun”, “Mountains”…)
+   - Keep layout compact (wrap, small buttons)
+
+2) Step click handler:
+   - set textarea to JSON.stringify(demoSteps[i].envelope, null, 2)
+   - set selectedDemoIndex = i
+   - clear status messages
+   - if autoApply === true: call Apply handler (applyEnvelope)
+
+3) Next Step:
+   - selectedDemoIndex = min(selectedDemoIndex+1, demoSteps.length-1)
+   - load that JSON into textarea
+   - apply only if autoApply === true
+
+4) Buttons:
+   - Validate: parse JSON + zod validate (CommandEnvelopeSchema.safeParse). Display Zod issues with (path + message). Do not apply.
+   - Apply: call store.applyEnvelope(textarea). Show success/fail.
+   - Clear: textarea = "" and clear messages, do not reset scene.
+   - Reset Scene: call store.resetScene() and clear textarea/messages.
+
+5) Add UI toggle:
+   - checkbox “Auto-apply demo steps”
+   - default OFF
+   - store in local state (ref)
+
+Stop when:
+- Clicking “Sky” only loads JSON
+- Validate shows errors/success without applying
+- Apply applies and updates canvas
+- Auto-apply ON restores one-click step applying
+- Next Step works in both modes
+
+────────────────────────────────────────────────────────
+B) Sky gradient (client/src/canvas/renderer/renderShape.ts + small helpers)
+────────────────────────────────────────────────────────
+You already have sky shape:
+- sky-1 object semanticTag === "sky"
+- a rect in shapes[] with width=100 height=45 fill="#7ec8ff"
+
+Implement gradient WITHOUT schema changes:
+1) In renderObject or renderShape, pass parent object info + stage dimensions.
+2) For rect shapes ONLY when parent semanticTag === "sky" (or object.id starts with "sky-"):
+   - Use Konva.Rect gradient props instead of flat fill.
+   - Vertical gradient top->horizon.
+
+Konva Rect gradient (pixels):
+- fillLinearGradientStartPoint: { x: 0, y: 0 }
+- fillLinearGradientEndPoint: { x: 0, y: rectHeightPx }
+- fillLinearGradientColorStops:
+  [0, "#0b79d0", 0.55, "#4fb6ff", 1, "#bfe9ff"]
+
+3) Add subtle warm band near horizon (optional but recommended, looks like reference):
+- In SkyLayer (or as an extra sky object drawn after the gradient sky rect),
+  draw a transparent rect from y = (HORIZON_Y - 10) to HORIZON_Y:
+  fill rgba(255, 210, 120, 0.18)
+This gives the “sunset glow” effect behind mountains.
+
+4) Optional: slight vignette to mimic “drawing paper” shading:
+- A very low opacity overlay rect on sky:
+  rgba(0,0,0,0.03)
+
+Stop when:
+- Sky is clearly gradient (not solid)
+- Near-horizon warm tint is visible but subtle
+
+────────────────────────────────────────────────────────
+C) Improve “reference-like” colors/strokes via demos (client/src/demo/demoEnvelopes.ts)
+────────────────────────────────────────────────────────
+Do NOT change /shared. Only tweak demoSteps shapes styles.
+
+Update the provided demoSteps in-place (same IDs), making them closer to the reference:
+
+1) Sun
+- Give sun a slightly orange/red fill and thin stroke:
+  fill "#ff5a3d" (or "#ff6a00")
+  stroke "#aa2f1b", strokeWidth 0.6
+- Add a faint glow circle behind it (same object, extra circle shape):
+  circle radius 14, fill "rgba(255,180,80,0.35)" (Konva supports rgba strings)
+
+2) Mountains
+- Use bluish fills and a darker stroke to feel like the reference:
+  mountain1 fill "#2f6fb5", stroke "#0b2b55", strokeWidth 0.6
+  mountain2 fill "#1f5f9f", stroke "#0b2b55", strokeWidth 0.6
+- Add a lighter “snow cap” polygon as an extra shape on each mountain (simple triangle on top):
+  small polygon near peak with fill "#cfe9ff", opacity 0.9
+
+3) Field
+- Use a gradient feel without schema changes:
+  Keep base green rect fill "#2fbf50"
+  Add a second semi-transparent rect overlay in same object:
+    rect y=0 height=55 fill "rgba(0,0,0,0.08)" with opacity gradient simulation:
+    (simple approach) add 2 overlays:
+      near horizon: darker thin band (opacity 0.08)
+      near bottom: slightly darker band (opacity 0.05)
+
+4) Path
+- Make it look like a winding path to the viewer:
+  Increase strokeWidth to ~12–16
+  Add a darker border path beneath (draw twice):
+    First path: stroke "#7a4a16", strokeWidth 16
+    Second path: stroke "#b07a2f", strokeWidth 12
+  Extend the path to the bottom foreground:
+    d should reach y close to 100.
+  Example:
+    d: "M 55 55 C 60 65, 70 75, 78 100"
+  (If your renderer uses horizon grounding for path, keep transform y = 0)
+
+5) Tree + House outlines
+- Add thin dark stroke on canopy and house walls/roof:
+  canopy stroke "#0f3d1a", strokeWidth 0.4
+  walls stroke "#3b2b1a", strokeWidth 0.4
+  roof stroke "#3b1b05", strokeWidth 0.4
+- Add a soft shadow ellipse under tree + house (extra ellipse shape with opacity):
+  fill "rgba(0,0,0,0.15)", opacity 0.15
+
+6) Birds
+- Increase strokeWidth slightly (1.2) and use darker color "#1a1a1a"
+
+7) Flowers
+- Add stroke to petals "#7a1a4a" strokeWidth 0.3
+- Add small green bush circles behind (optional)
+
+IMPORTANT:
+- Keep all shapes within your existing complexity caps.
+
+Stop when:
+- The scene resembles the reference more closely (gradient sky, sunset band, clearer mountains, thicker path, outlined objects)
+
+────────────────────────────────────────────────────────
+D) Render-time “ms” bug (optional)
+────────────────────────────────────────────────────────
+Your HUD shows 0ms. Fix by storing lastApplyMs from store and ensuring you’re reading it in UI overlay.
+No need to measure Konva draw; just measure applyCommands + state update.
+
+────────────────────────────────────────────────────────
+Definition of Done
+────────────────────────────────────────────────────────
+STOP when:
+- Manual console behaves correctly (load vs apply; toggle; validate/apply/clear/reset all work)
+- Demo buttons show names (not 1..10)
+- Sky renders as gradient + subtle horizon warm glow
+- Color/stroke improvements make output feel closer to the provided reference image
+- No changes outside client/src/**

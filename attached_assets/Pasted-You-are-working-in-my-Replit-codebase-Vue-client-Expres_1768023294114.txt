@@ -1,0 +1,80 @@
+You are working in my Replit codebase (Vue client + Express/WS server). I have a persistent issue: the server console spams:
+
+Client connected
+Client disconnected
+Client connected
+Client disconnected
+...
+
+This repeats rapidly even when I’m not interacting with the UI. We already attempted changing the WS path, but it did NOT fix it. Do NOT guess. You must find the exact root cause using evidence, then apply the smallest safe fix.
+
+GOAL
+1) Identify which WebSocket endpoint is flapping (/ws, /ws-app, /ws-live) and WHY it closes.
+2) Fix it with minimal changes.
+3) Verify stability + core functionality (scene_update + submit_utterance) after the fix.
+
+STRICT RULES
+- Do NOT refactor or “clean up” unrelated code.
+- Do NOT change shared schemas/contracts unless absolutely required to fix the bug.
+- Do NOT change UI layout/design.
+- Only touch files required for the fix.
+- If you add logging, keep it temporary and minimal; remove it if not needed.
+- Preserve Phase 1–8 architecture and existing behavior.
+
+WHAT TO CHECK (EVIDENCE FIRST)
+A) Determine who is connecting:
+   - Add clear, unique logs for each WS server:
+     - “[WS] connection …”
+     - “[LIVE] connection …”
+   - Log remote address (req.socket.remoteAddress), headers origin, and requested URL.
+   - Log ws close event with code + reason on server side.
+   - Log close event code + reason on client side.
+
+B) Determine why it disconnects:
+   - Check if the server is closing the socket (explicit close) vs client closing vs proxy reset.
+   - Capture the close code:
+     - 1000/1001 = normal/going away
+     - 1006 = abnormal (often proxy/network/HMR)
+     - 1011 = server error
+   - Check for exceptions thrown in WS handlers that might terminate connections.
+   - Inspect whether Vite HMR or another dev tool is using the same WS path.
+   - Confirm there is only ONE WebSocketServer bound to a given path.
+   - Confirm the client does not create repeated sockets due to mount/unmount loops (HMR), timers, or multiple connect() calls.
+   - Confirm Replit preview/proxy does not require a different WS URL/host.
+
+C) Verify it’s not Live session causing it:
+   - The current spam logs show “Client connected/disconnected” (not “[Live]”), but verify with evidence.
+   - Ensure /ws-live only connects when Live mode is enabled.
+
+FIX REQUIREMENTS
+- Apply the smallest change that stops the connect/disconnect loop.
+- If the cause is HMR collision: fix by isolating HMR WS vs app WS cleanly (correct path and correct client URL) with proof.
+- If the cause is client reconnect logic: fix reconnection conditions (don’t reconnect on intentional closes; prevent double sockets).
+- If the cause is server closing sockets: fix the root error and prevent crash/close.
+- If the cause is Replit proxy: adjust WS URL construction appropriately (wss/http host), with proof.
+
+VERIFICATION (MANDATORY)
+After implementing the fix:
+1) Run the dev server.
+2) Keep the app open for at least 60 seconds.
+3) Confirm the server log does NOT show rapid connect/disconnect spam.
+4) Confirm the client shows stable WS “connected”.
+5) Send a test utterance from UI (or programmatically) and confirm:
+   - server receives submit_utterance
+   - client receives transcript_final and scene_update
+   - no disconnect loop starts after sending
+
+OUTPUT I EXPECT FROM YOU
+1) Root cause explanation with concrete evidence (logs + close codes + path + who initiated close).
+2) Exactly which files you changed and why (minimal diff).
+3) The commands you ran to verify, and what you observed.
+4) Confirmation that no unwanted changes were made.
+
+CONTEXT / FILES INVOLVED
+- client/src/state/wsStore.ts (reconnect logic)
+- client/src/state/liveStore.ts (Gemini Live WS)
+- server/routes.ts (WebSocketServer paths: /ws and /ws-live)
+- client/App.vue calls wsStore.connect() onMounted and wsStore.disconnect() onUnmounted
+- UtteranceInput.vue controls browser voice + Gemini Live voice
+
+Start by instrumenting close code/reason on both sides, identify the exact culprit, then fix.

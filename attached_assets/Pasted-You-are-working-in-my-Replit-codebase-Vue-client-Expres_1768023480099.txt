@@ -1,0 +1,108 @@
+You are working in my Replit codebase (Vue client + Express/WS server) *.
+
+RECAP (WHAT WE BUILT SO FAR)
+Phase 1–4 (working)
+- Shared contracts: SceneGraph + SceneObject + VectorShape primitives + strict bounds/limits.
+- Deterministic reducer: applyCommand/applyCommands + replay-based undo/redo semantics.
+- Server-authoritative state + WebSocket protocol on **/ws**:
+  - client → server: submit_utterance, apply_command_envelope, reset_scene, etc.
+  - server → client: scene_update, transcript_partial/final, command_envelope, status, error.
+- Client wsStore connects on App.vue mount, renders only server scene_update.
+
+Phase 5–7 (working)
+- CommandDirector improvements: schema normalization and guardrails (e.g., converting invalid update_* formats into valid patches).
+- Browser STT fallback using Web Speech API (speechStore) with silence segmentation (~700ms) and auto-submit.
+
+Phase 8 (in progress / not stable yet)
+- We added **Gemini Live streaming voice**:
+  - New WS endpoint **/ws-live**
+  - shared/liveWs.ts message schema: start_live/stop_live/ping_live + transcript_partial/final + live_status/live_error.
+  - client liveStore: AudioWorklet streams binary PCM frames; sends start_live with actual AudioContext.sampleRate (Option A).
+  - server/gemini/liveSession.ts: createLiveSession/sendAudioChunk/closeLiveSession/getSessionLatency with dynamic sampleRate.
+- UI update: UtteranceInput.vue supports 3 modes: off / live / browser, with overlay, toggle, and mode switch.
+
+CURRENT PROBLEM (WHAT WE ARE TRYING TO FIX)
+The app is unstable because the **WebSocket connection keeps repeatedly connecting and disconnecting**. Server console spams:
+
+Client connected
+Client disconnected
+Client connected
+Client disconnected
+...
+
+This loop happens rapidly and the platform says connecting and disconnecting. We attempted some error-handling updates, but it still did NOT fix it. We need to find the exact root cause with evidence, then apply the smallest safe fix.
+
+GOAL
+1) Identify exactly which WebSocket endpoint is flapping (/ws vs /ws-live) and WHY it closes.
+2) Fix it with minimal changes (no refactor).
+3) Verify stability + core functionality after fix:
+   - stable WS connected for at least 60 seconds
+   - submit_utterance works end-to-end (server receives, client gets transcript_final + scene_update)
+   - /ws-live only connects when Live mode is enabled
+
+STRICT RULES
+- Do NOT guess. Use evidence.
+- Do NOT refactor or “clean up” unrelated code.
+- Do NOT change shared schemas/contracts unless absolutely required for the bug.
+- Do NOT change UI layout/design.
+- Only touch files required for the fix.
+- If you add logging, keep it minimal and remove if not needed.
+- Preserve Phase 1–8 architecture and behavior.
+
+WHAT TO CHECK (EVIDENCE FIRST)
+A) Determine who is connecting:
+   - Add clear, unique logs for each WS server:
+     - “[WS] connection …”
+     - “[LIVE] connection …”
+   - Log remote address (req.socket.remoteAddress), origin header, and requested URL.
+   - Log ws close event with code + reason on server side.
+   - Log close event with code + reason on client side.
+
+B) Determine why it disconnects:
+   - Confirm if server closes socket vs client closes vs proxy reset.
+   - Capture close codes:
+     - 1000/1001 = normal/going away
+     - 1006 = abnormal (proxy/network/HMR)
+     - 1011 = server error
+   - Check for exceptions in WS handlers.
+   - Check if Vite HMR is colliding with our WS path.
+   - Confirm only ONE WebSocketServer bound per path.
+   - Confirm client isn’t creating repeated sockets due to mount/unmount loops (HMR), timers, or multiple connect() calls.
+   - Confirm Replit preview/proxy requires special WS URL handling.
+
+C) Verify it’s not Live causing it:
+   - The spam currently shows “Client connected/disconnected” (not “[Live]”), but verify with evidence.
+   - Ensure /ws-live only connects when voiceMode = live.
+
+FIX REQUIREMENTS
+- Apply the smallest change that stops the loop.
+- If it’s HMR collision: isolate HMR WS vs app WS cleanly (path + client URL) with proof.
+- If it’s client reconnect logic: fix conditions (don’t reconnect on intentional closes; prevent duplicate sockets).
+- If it’s server closing due to error: fix root error and prevent close.
+- If it’s Replit proxy: adjust WS URL construction appropriately (host/wss), with proof.
+
+VERIFICATION (MANDATORY)
+After implementing the fix:
+1) Run the dev server.
+2) Keep the app open for at least 60 seconds.
+3) Confirm server log does NOT spam connect/disconnect.
+4) Confirm client shows stable WS “connected”.
+5) Send a test utterance from UI and confirm:
+   - server receives submit_utterance
+   - client receives transcript_final and scene_update
+   - no disconnect loop starts after sending
+
+OUTPUT I EXPECT FROM YOU
+1) Root cause explanation with concrete evidence (logs + close codes + path + who initiated close).
+2) Exactly which files you changed and why (minimal diff).
+3) Commands you ran to verify and what you observed.
+4) Confirmation that no unwanted changes were made.
+
+FILES INVOLVED
+- client/src/state/wsStore.ts (reconnect logic)
+- client/src/state/liveStore.ts (Gemini Live WS)
+- server/routes.ts (WebSocketServer paths: /ws and /ws-live)
+- client/App.vue connects wsStore onMounted and disconnects onUnmounted
+- components/UtteranceInput.vue controls browser voice + Live voice
+
+Start by instrumenting close codes/reasons on both sides, identify the exact culprit, then fix.

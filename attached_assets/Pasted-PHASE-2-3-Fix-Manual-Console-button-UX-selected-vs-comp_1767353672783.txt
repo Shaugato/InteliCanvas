@@ -1,0 +1,192 @@
+PHASE 2.3 — Fix Manual Console button UX (selected vs completed, no confusing green states, correct Next Step behavior) + make the scene more “realistic/illustrative” (still vector-only, no schema changes).
+
+HARD GUARDRAILS
+- Client-only changes under client/src/**
+- DO NOT modify /shared/** or /server/**
+- DO NOT change schemas/contracts/commands
+- Keep deterministic: render purely from SceneGraph
+
+CURRENT ISSUES (from screenshot + feedback)
+A) Button UX
+1) Buttons are confusing: “green” indicates multiple meanings (selected? completed?).
+2) “Next Step 1/10” doesn’t clearly indicate what’s selected and what is completed.
+3) Auto-apply ON makes Apply/Validate feel inconsistent; user can’t tell what actually happened.
+4) Clear sometimes doesn’t feel like it cleared selection/messages properly.
+Requirement: foolproof state system with clear visuals:
+- ONE selected step at a time
+- completed steps indicated separately (not the same as selected)
+- auto-apply still supported but should not blur states
+
+B) Realism / illustrative style
+Scene is improved but still “flat”:
+- mountains/field lack shading depth
+- path looks like a flat ribbon (needs perspective + edge shading)
+- tree/house need subtle outlines + shadows
+- sky gradient is okay but can be more “sunset-like” behind sun
+Goal: closer to “drawing/painting vibe” while staying vector primitives.
+
+────────────────────────────────────────────
+PART 1 — Manual Console UX: definitive state machine + styling
+────────────────────────────────────────────
+
+1) Implement strict step state model (ManualConsole.vue)
+State:
+- selectedIndex: number | null            // the step currently loaded in textarea
+- appliedIndex: number | null             // last step that was applied via demo buttons/next
+- completed: Set<number>                  // steps applied at least once since last Reset
+- autoApply: boolean                      // existing toggle
+- text: string                            // textarea JSON
+- status: { kind: "idle"|"loaded"|"validated_ok"|"validated_err"|"applied_ok"|"applied_err", msg?: string }
+
+Rules:
+A) Clicking a demo step i:
+- selectedIndex = i
+- load textarea = JSON.stringify(demoSteps[i].envelope, null, 2)
+- status = loaded
+- DO NOT mark completed here
+- If autoApply is ON:
+  -> call doApplyFromTextarea()
+  -> on success: completed.add(i) and appliedIndex = i
+
+B) Next Step:
+- if selectedIndex is null: next=0 else next=min(selectedIndex+1, last)
+- set selectedIndex = next
+- load textarea
+- if autoApply ON: apply & mark completed(next); appliedIndex=next
+
+C) Validate:
+- validate textarea only
+- status validated_ok / validated_err
+- DO NOT mutate completed/appliedIndex
+
+D) Apply:
+- apply textarea only (store.applyEnvelope(text))
+- if selectedIndex != null AND textarea equals current selected demo JSON (trim compare):
+  - completed.add(selectedIndex)
+  - appliedIndex = selectedIndex
+- status applied_ok / applied_err
+
+E) Clear:
+- text = ""
+- status = idle (or “cleared”)
+- DO NOT change scene
+- DO NOT change completed/appliedIndex
+- (optional) keep selectedIndex, but visually show “No JSON loaded” until user clicks a step again
+
+F) Reset Scene:
+- store.resetScene()
+- selectedIndex = null
+- appliedIndex = null
+- completed = new Set()
+- text = ""
+- status = idle
+
+IMPORTANT: Remove any logic that highlights i <= selectedIndex. Never use “range highlight”.
+
+2) Button visual states (Tailwind classes)
+Each step button has 4 visuals (mutually clear):
+- default: neutral gray
+- selected: BLUE highlight (border + glow)
+- completed: GREEN badge/check icon (not full green background)
+- last-applied: subtle GREEN ring (or small “Applied” pill)
+
+Implementation:
+- Base button: bg-slate-800 text-slate-100 border border-slate-700 hover:bg-slate-700
+- Selected: bg-blue-600 border-blue-300 shadow shadow-blue-500/30
+- Completed (not selected): keep base bg, add small ✅ badge (top-right) or left dot
+- Last applied: add ring-2 ring-green-400 (but don’t change bg)
+
+Compute:
+isSelected = i === selectedIndex
+isCompleted = completed.has(i)
+isLastApplied = i === appliedIndex
+
+Never paint multiple buttons as selected.
+
+3) Make step labels cleaner
+Render button label as:
+- remove “Step X:” prefix visually
+- show short name: “Sky”, “Sun”, “Mountains”, “Field”, “Path”, “Tree (Preview)”, …
+You can parse name string by splitting on ": " and using the right side, fallback original.
+
+4) Status strip
+Add a small status line under buttons:
+- “Selected: <name>”
+- “Last applied: <name>”
+- “Auto-apply: ON/OFF”
+This makes it obvious what happened.
+
+STOP when:
+- Clicking “Tree (Preview)” highlights ONLY that button in blue
+- Completed steps show ✅ badge but do NOT turn full green
+- Apply does not highlight earlier steps
+- Next Step updates selection correctly
+- Clear clears textarea + messages reliably
+
+────────────────────────────────────────────
+PART 2 — Make scene more realistic (vector-only)
+────────────────────────────────────────────
+
+A) Improve sky to match “real picture” vibe
+1) Sky gradient (already present) — refine stops:
+- Top: deeper blue
+- Mid: lighter
+- Near horizon: warm tint
+Use rect gradient stops:
+[0, "#1976d2", 0.5, "#55c2ff", 0.78, "#bfefff", 1, "#ffe2a8"]
+Then overlay a horizon glow band (low opacity):
+- Rect from y=(HORIZON_Y-10) to HORIZON_Y, fill rgba(255,160,60,0.18)
+
+B) Add atmospheric perspective for mountains
+In renderer (NOT schema), if semanticTag==="mountain":
+- Apply slight opacity based on y (farther = lighter):
+  background mountains: opacity 0.9
+  second mountain: opacity 0.8
+- Add subtle gradient fill effect by drawing a second polygon on top (same points) with:
+  fill "rgba(255,255,255,0.08)" and a small y-offset (fake highlight)
+Or easiest: in demo envelopes add a “highlight polygon” + “snow cap polygon”.
+
+C) Field shading bands (simple but effective)
+Keep your field base rect.
+Add 2 overlay rect shapes in the same field object (demoEnvelopes.ts):
+- Near horizon band: y=0 height=12 fill rgba(0,0,0,0.06)
+- Foreground band: y=35 height=20 fill rgba(0,0,0,0.04)
+This gives depth without textures.
+
+D) Path realism: perspective + edges + shadow
+Right now it’s a uniform-width ribbon. Improve with 3-layer stroke technique:
+1) Shadow path (bottom): stroke rgba(0,0,0,0.25), strokeWidth = 18
+2) Edge path: stroke "#6b3f12", strokeWidth = 16
+3) Main path: stroke "#b07a2f", strokeWidth = 12
+Update path.d so it starts near horizon and ends at foreground:
+Example d (world units):
+"M 55 45 C 58 55, 65 70, 78 100"
+Also add a second “near segment” thicker if needed (optional).
+
+E) Tree and house: outlines + soft shadows
+- Add thin stroke to canopy circles: stroke "#0f3d1a", strokeWidth 0.4
+- Add house wall stroke: "#3b2b1a", strokeWidth 0.4
+- Add soft shadow ellipse under tree + house (demo envelopes):
+  ellipse fill rgba(0,0,0,0.18), opacity 0.18
+This will instantly feel less flat.
+
+F) Small detail polish
+- Birds: stroke "#111", strokeWidth 1.2
+- Flowers: add small leaf circles behind petals with opacity 0.6
+- Add a thin darker line at horizon (very subtle): line y=HORIZON_Y stroke rgba(0,0,0,0.10)
+
+STOP when:
+- Scene feels less “solid flat”
+- Path has edges/shadow and reads as winding road
+- Mountains have depth (outline + light highlight)
+- Tree/house have shadows and outlines
+- All achieved with primitives only
+
+────────────────────────────────────────────
+Definition of Done
+────────────────────────────────────────────
+- Manual console buttons have unambiguous selected vs completed vs last-applied states
+- No range highlighting
+- Clear and Reset behave correctly
+- Scene looks more illustrative/realistic via gradients, outlines, shadows, and atmospheric depth
+- No edits outside client/src/**

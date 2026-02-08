@@ -1,0 +1,301 @@
+PHASE 1 — Shared contracts: SceneGraph + DrawingCommands + strict validation (Zod + JSON Schema).
+
+Goal
+
+Lock down the shared TypeScript types and Zod validators that everything else depends on.
+Gemini must be forced to output only a valid CommandEnvelope JSON object.
+
+This phase is about correctness, determinism, and AI safety, not rendering or UI.
+
+Global Rules (non-negotiable)
+
+Do NOT create any new servers or ports.
+
+Work only in:
+
+/shared
+
+one small test file in /server
+
+Coordinate grid is normalized: x and y are 0–100 inclusive.
+
+Every scene object has:
+
+id, type, layer, status, transform, style, geometry
+
+
+Preview objects live in the same graph with:
+
+status: "preview"
+
+
+Use Zod for all validation.
+
+Also export a JSON Schema derived from Zod (for Gemini structured outputs).
+
+Do NOT touch client or server runtime logic.
+
+1️⃣ Create /shared/scene.ts — STRICT SceneGraph model
+Enums (keep exactly these)
+SceneObjectType = "tree" | "house" | "mountain" | "sun" | "birds" | "flowers" | "bush" | "path" | "sky" | "field"
+SceneLayer = "sky" | "ground" | "background" | "foreground"
+SceneObjectStatus = "preview" | "committed"
+
+Reusable schemas
+
+Create and export:
+
+PointSchema
+
+{ x: 0..100, y: 0..100 }
+
+
+TransformSchema
+
+{ x:0..100, y:0..100, scale:0.1..3, rotation:-180..180 }
+
+
+SceneIntentSchema
+
+{ description: string, mood?: "calm"|"bright"|"dramatic"|"sunset", paletteHint?: string }
+
+
+GradientSchema (export this)
+
+{
+  kind: "linear",
+  from: PointSchema,
+  to: PointSchema,
+  stops: { offset:0..1, color:string }[]
+}
+
+
+StyleSchema
+
+{
+  fill?: string,
+  stroke?: string,
+  strokeWidth?: 0..20,
+  opacity?: 0..1,
+  gradient?: GradientSchema,
+  textureRef?: string
+}
+
+Geometry (STRICT, discriminated union)
+
+All point coordinates must use PointSchema.
+
+tree      { trunkThickness?:0..20, canopyRadius?:0..50 }
+house     { roofColor?:string, wallColor?:string }
+mountain  { peakX?:0..100, peakY?:0..100, baseWidth?:0..200 }
+sun       { radius?:0..50 }
+birds     { count?:1..20 }
+flowers   { density?:0..1 }
+bush      { radius?:0..50 }
+path      { bezierPoints: PointSchema[], widthNear:0..50, widthFar:0..50 }
+sky       {}
+field     {}
+
+SceneObjectSchema (CRITICAL)
+
+Do NOT use z.any() anywhere.
+
+Implement SceneObjectSchema as a discriminatedUnion on type so that:
+
+object.type must match geometry.type
+
+Geometry is always valid for that object type
+
+Pattern:
+
+BaseObject = { id, layer, status, transform, style }
+
+SceneObjectSchema = discriminatedUnion("type", [
+  { ...BaseObject, type:"tree", geometry: GeometryTree },
+  { ...BaseObject, type:"house", geometry: GeometryHouse },
+  ...
+])
+
+SceneGraphSchema
+SceneGraph {
+  intent: SceneIntent | null,
+  objects: Record<string, SceneObject>,
+  order: string[]
+}
+
+
+Export all schemas + inferred types.
+
+2️⃣ Create /shared/commands.ts — DrawingCommands (preview-safe)
+Command rules (must be enforced by schema)
+
+add_preview_object → object.status === "preview"
+
+add_object → object.status === "committed"
+
+update_* commands:
+
+MUST NOT allow patching id or type
+
+batch must validate recursively
+
+Patch schema (important)
+
+Because SceneObjectSchema is a discriminated union, define a safe patch schema:
+
+Only allow:
+
+layer
+
+status
+
+transform
+
+style
+
+geometry
+
+Explicitly forbid id and type using refinement
+
+Required commands
+Scene intent
+set_scene_intent { intent: SceneIntent | null }
+
+Preview workflow
+add_preview_object
+update_preview_object
+commit_preview_object
+cancel_preview_object
+
+Non-preview
+add_object
+update_object
+delete_object
+
+Scene styling
+set_background_gradient { gradient: Gradient }
+set_ground_fill { fill: string }
+set_path { id, bezierPoints, widthNear, widthFar }
+
+Optional
+batch { commands: DrawingCommand[] }
+
+
+Implement DrawingCommandSchema as a discriminatedUnion("type", [...]).
+
+Export types.
+
+3️⃣ Create /shared/schema.ts — CommandEnvelope + JSON Schema
+CommandEnvelopeSchema (EXACT shape)
+{
+  commands: DrawingCommand[],
+  notes?: string,
+  refused?: boolean,
+  refusalReason?: string
+}
+
+
+Validate using Zod
+
+Export CommandEnvelopeSchema
+
+Export inferred CommandEnvelope type
+
+Export JSON Schema using zod-to-json-schema
+
+CommandEnvelopeJsonSchema
+
+Do NOT weaken validation here — enforcement belongs in scene.ts and commands.ts.
+
+4️⃣ Create /shared/index.ts
+
+Re-export everything cleanly:
+
+scene schemas + types
+
+command schemas + types
+
+CommandEnvelopeSchema
+
+CommandEnvelopeJsonSchema
+
+This allows both client and server to import from /shared.
+
+5️⃣ Add validation tests — /server/phase1.test.ts
+
+Create or update ONE test file with the following tests:
+
+Test 1 — valid envelope passes
+
+add_object
+
+valid coordinates
+
+committed status
+
+Test 2 — invalid coordinate fails
+
+x: -5
+
+must be rejected
+
+Test 3 — preview status enforcement
+
+add_preview_object
+
+status: "committed"
+
+must be rejected
+
+print:
+
+Success: add_preview_object rejected committed status.
+
+Test 4 — illegal patch mutation
+
+update_object
+
+patch includes { id: "evil-id" }
+
+must be rejected
+
+print:
+
+Success: update_object rejected id mutation.
+
+
+End with:
+
+Phase 1 Validation Tests Passed.
+
+
+Do NOT modify server or client code.
+
+Definition of Done (STOP HERE)
+
+TypeScript builds with no errors
+
+All four tests pass via:
+
+npx tsx server/phase1.test.ts
+
+
+Zod rejects:
+
+out-of-range coordinates
+
+preview/commit violations
+
+id/type mutation
+
+JSON Schema exports successfully
+
+Important Notes
+
+This Phase 1 contract must not change later.
+
+Renderer, undo/redo, Gemini Live, and final render all depend on this stability.
+
+This schema is what turns Gemini from a “chat model” into a deterministic tool driver.
+
+Stop when Phase 1 is complete.

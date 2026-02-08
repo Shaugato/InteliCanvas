@@ -1,0 +1,303 @@
+PHASE 2 — Client-only generic Vue + Konva renderer (SceneObject.shapes[]) with correct scaling/composition + ghost preview + debug + manual console.
+
+HARD GUARDRAILS (MUST FOLLOW)
+- DO NOT modify /shared/** or /server/** at all. Phase 2 is CLIENT-ONLY.
+- DO NOT add new schemas, SceneGraph fields, or PathDataSchema.
+- DO NOT change Phase 1 contracts. Use existing:
+  - SceneObject { id, status, layer, transform{x,y,scale,rotation}, semanticTag?, shapes: VectorShape[] }
+  - VectorShape union: rect/circle/ellipse/line/polyline/polygon/path(d)/text
+- DO NOT introduce new command types. Only handle existing Phase 1 commands in client applyCommands.
+- Sky/ground/path/mountains/tree/house/etc MUST be represented as regular shapes inside shapes[] (rects, polygons, paths, circles…).
+
+GOAL / OUTCOME
+- Clicking demo steps builds a coherent countryside landscape (like the expected reference):
+  - sky fills top band
+  - green field fills bottom band
+  - mountains sit on the horizon
+  - sun appears near horizon
+  - winding path curves and is thick in foreground
+  - tree + house sit ON the ground (not floating)
+  - birds + flowers appear in correct places
+- Preview objects render as ghost (opacity 0.35 + dashed outline + “preview” label) and commit makes them solid.
+- Manual console can paste a CommandEnvelope JSON -> validate via Zod -> apply -> render.
+- Debug panel shows Scene JSON, last envelope JSON, render/apply time ms.
+
+────────────────────────────────────────────────────────
+1) Client dependencies
+────────────────────────────────────────────────────────
+Install Konva + Vue binding (choose ONE):
+- konva
+- vue-konva   (recommended)
+Ensure imports are consistent everywhere.
+
+────────────────────────────────────────────────────────
+2) Scene store + applyCommands (client-only)
+────────────────────────────────────────────────────────
+Create/confirm these files:
+- client/src/store/sceneStore.ts
+- client/src/engine/applyCommands.ts
+
+sceneStore state:
+- scene (SceneGraph)
+- lastEnvelope (CommandEnvelope | null)
+- lastApplyMs (number)
+- lastError (string | null)
+
+sceneStore actions:
+- validateEnvelope(rawText: string): { ok, error?, envelope? }
+- applyEnvelope(rawText: string): { ok, error? }
+  Steps:
+  1) JSON.parse try/catch
+  2) Zod validate with CommandEnvelopeSchema from /shared
+  3) If envelope.refused === true: do NOT apply; show refusalReason
+  4) start = performance.now()
+  5) scene = applyCommands(scene, envelope.commands) (NO in-place mutation)
+  6) lastEnvelope = envelope; lastApplyMs = performance.now() - start
+
+applyCommands.ts:
+Support ONLY existing Phase 1 commands needed for demos:
+- add_object
+- update_object
+- delete_object
+- add_preview_object
+- update_preview_object
+- commit_preview_object
+- cancel_preview_object
+- set_scene_intent (if exists)
+Rules:
+- never mutate existing objects/scene in place
+- maintain scene.order array
+- commit_preview_object flips status preview->committed
+- cancel_preview_object removes preview objects
+- forbid id mutation in updates
+
+────────────────────────────────────────────────────────
+3) CanvasStage + strict stage layers
+────────────────────────────────────────────────────────
+Create client/src/canvas/CanvasStage.vue:
+Konva Stage with these Konva Layers (in order):
+1) sky
+2) background
+3) ground
+4) foreground
+5) previewOverlay (ghost previews + bbox + label)
+6) uiOverlay (HUD)
+
+IMPORTANT:
+- SceneObject.layer remains only: sky/background/ground/foreground
+- previewOverlay and uiOverlay are NOT SceneObject layers; they are stage layers only.
+
+Responsive sizing:
+- Use ResizeObserver to get container width
+- Height = width * 0.55 (or similar) to mimic landscape aspect
+- Compute stageW, stageH
+
+World-to-pixel helpers (world is 0..100):
+sx = stageW / 100
+sy = stageH / 100
+wx(v) = v * sx
+wy(v) = v * sy
+
+────────────────────────────────────────────────────────
+4) CRITICAL FIX: Composition rules (make it look like expected image)
+────────────────────────────────────────────────────────
+Add a small composition module:
+- client/src/canvas/composition.ts
+
+Define constants (world units):
+HORIZON_Y = 45
+
+Depth scale by layer:
+layerScale:
+- sky: 1.0
+- background: 0.90
+- ground: 1.0
+- foreground: 1.10
+
+Ground anchoring rule:
+For objects where (layer is ground or foreground) AND semanticTag in
+["tree","house","flowers","bush","path","field"]:
+Interpret transform.y as offset from horizon downwards:
+finalWorldY = HORIZON_Y + transform.y
+
+For sky/background objects:
+finalWorldY = transform.y
+
+Mountains + sun placement rule:
+If semanticTag in ["mountain","sun"]:
+Clamp so they sit near horizon (not deep in sky):
+finalWorldY = min(transform.y, HORIZON_Y - 20)
+(Keep it simple: this prevents floating high in sky.)
+
+Field rule:
+Field object should start at horizon and extend to bottom:
+- In demo, create a “field” object with a rect y=0 height=(100-HORIZON_Y) inside shapes,
+  and set object.transform.y = HORIZON_Y, so it aligns perfectly.
+
+Sky rule:
+Sky object should cover 0..HORIZON_Y:
+- In demo, sky rect y=0 height=HORIZON_Y, object.transform.y=0.
+
+These rules are deterministic and renderer-only.
+
+────────────────────────────────────────────────────────
+5) Generic renderer (SceneObject -> Group -> Shapes)
+────────────────────────────────────────────────────────
+Create:
+- client/src/canvas/renderer/renderObject.ts
+- client/src/canvas/renderer/renderShape.ts
+- client/src/canvas/renderer/bbox.ts (for preview outline)
+
+Rendering strategy (avoid double scaling):
+- Convert object group position to pixels using wx/wy on finalWorldX/finalWorldY.
+- Apply ONLY semantic scale (transform.scale * layerScale) at group level.
+- Convert shape geometry from world units to pixels inside renderShape
+  OR (alternate) keep shapes in world units and scale group by sx/sy.
+Pick ONE method and be consistent.
+
+RECOMMENDED (simpler, fewer bugs):
+A) Group does NOT include sx/sy, only semantic scaling:
+   group.x = wx(finalWorldX)
+   group.y = wy(finalWorldY)
+   group.scaleX = group.scaleY = (transform.scale * layerScale)
+B) Shapes convert their coords to pixels:
+   rect: x=wx(s.x), y=wy(s.y), width=wx(s.width), height=wy(s.height)
+   circle: x=wx(s.x), y=wy(s.y), radius=wx(s.radius)
+   ellipse: x=wx(s.x), y=wy(s.y), radiusX=wx(s.radiusX), radiusY=wy(s.radiusY)
+   line/polyline/polygon points: map pairs via wx/wy
+   path: use a nested Group with scaleX=sx, scaleY=sy, and pass d directly to Konva.Path (data prop)
+       (Konva.Path expects pixels; scaling group converts world-unit path data.)
+   text: x=wx(s.x), y=wy(s.y), fontSize=clamp(pxFontSize), fill from s.fill, align supported
+
+Konva node mapping:
+- rect -> Konva.Rect
+- circle -> Konva.Circle
+- ellipse -> Konva.Ellipse
+- line/polyline -> Konva.Line (closed=false)
+- polygon -> Konva.Line (closed=true)
+- path -> Konva.Path (data = s.d)
+- text -> Konva.Text
+
+Style mapping:
+- fill, stroke, strokeWidth, opacity (default 1)
+
+────────────────────────────────────────────────────────
+6) Preview overlay rules (must match spec)
+────────────────────────────────────────────────────────
+Preview objects are those with status === "preview".
+Render preview objects ONLY in previewOverlay layer (recommended).
+Preview styling:
+- group opacity = 0.35
+- dashed outline:
+  - compute object-local bbox from shapes (in world units), then convert to px with wx/wy
+  - draw Konva.Rect (no fill) strokeWidth=2 dash=[6,4]
+- label:
+  - Konva.Text “preview” near bbox top-left
+
+Commit makes them solid:
+- committed objects render in their normal layer with normal opacity.
+
+HUD (uiOverlay):
+- text: “Objects: X | Previews: Y | {lastApplyMs}ms”
+
+────────────────────────────────────────────────────────
+7) DebugPanel + Manual Console (client-only)
+────────────────────────────────────────────────────────
+Create:
+- client/src/components/ManualConsole.vue
+- client/src/components/DebugPanel.vue
+
+ManualConsole:
+- textarea for JSON
+- buttons: Validate, Apply, Clear, Reset Scene
+- shows green success or red Zod error summary (path + message)
+- demo step buttons (see below)
+
+DebugPanel:
+- pretty-print current scene JSON
+- pretty-print last envelope JSON
+- show lastApplyMs
+- copy buttons
+
+────────────────────────────────────────────────────────
+8) Demo envelopes must be visually correct (this fixes the “tiny floating icons”)
+────────────────────────────────────────────────────────
+Create: client/src/demo/demoEnvelopes.ts
+Provide step buttons that apply a VALID CommandEnvelope each time.
+
+IMPORTANT: Use realistic world sizes. Your scene is 0..100, so shapes should be big.
+Example sizing guidance:
+- sky rect: width 100, height HORIZON_Y (45)
+- field rect: width 100, height (100-HORIZON_Y)=55
+- mountains polygons spanning wide ranges (x from -10 to 110), y around horizon
+- sun radius around 10–14
+- tree trunk width ~3 height ~15, canopy circles radius ~6–9
+- house width ~14 height ~10, roof polygon taller
+- birds are small V polylines near upper sky
+- flowers cluster near bottom-left, slightly larger than birds
+
+Steps:
+Step 1: Sky
+- add_object id:"sky-1", layer:"sky", status:"committed", transform {x:0,y:0,scale:1,rotation:0}
+- shapes: rect {x:0,y:0,width:100,height:45, fill:"#7ec8ff"} (solid ok)
+
+Step 2: Sun
+- add_object id:"sun-1", layer:"background", transform {x:70,y:25,scale:1,rotation:0}
+- shapes: circle {x:0,y:0,radius:12, fill:"#ff5a3d"}
+
+Step 3: Mountains (2 objects)
+- mountain-1 at transform {x:15,y:25,scale:1,rotation:0}
+  polygon points large triangle-ish that touches horizon
+- mountain-2 at transform {x:60,y:28,scale:1,rotation:0}
+
+Step 4: Ground/Field
+- add_object id:"field-1", layer:"ground", semanticTag:"field",
+  transform {x:0,y:0,scale:1,rotation:0}
+- shapes: rect {x:0,y:0,width:100,height:55, fill:"#3fbf4f"}
+NOTE: renderer grounding rule will place ground objects at HORIZON_Y + transform.y, so set transform.y = 0 and ensure object is anchored at horizon in composition.
+
+Step 5: Path
+- add_object id:"path-1", layer:"ground", semanticTag:"path",
+  transform {x:0,y:0,scale:1,rotation:0}
+- shapes: path { d:"M 55 55 C 60 65, 70 75, 78 100" , stroke:"#a8702a", strokeWidth:12, fill:"transparent" }
+(Use world-unit path data; renderer scales it via sx/sy wrapper.)
+
+Step 6: Tree (Preview)
+- add_preview_object id:"tree-1", layer:"foreground", semanticTag:"tree",
+  transform {x:18,y:30,scale:1,rotation:0}   // y is offset from horizon due to grounding
+- shapes: trunk rect {x:0,y:0,width:3,height:15, fill:"#7a3d1a"}
+         canopy circles around (x:0..10,y:-5..5) radius 6..9 fill green
+
+Step 7: Commit Tree
+- commit_preview_object { id:"tree-1" }
+
+Step 8: House
+- add_object id:"house-1", layer:"foreground", semanticTag:"house",
+  transform {x:28,y:32,scale:1,rotation:0}
+- shapes: walls rect width ~14 height ~9
+         roof polygon points
+         door/window rects
+
+Step 9: Birds
+- add_object id:"birds-1", layer:"background", semanticTag:"birds",
+  transform {x:72,y:18,scale:1,rotation:0}
+- shapes: two small polyline V strokes
+
+Step 10: Flowers
+- add_object id:"flowers-1", layer:"foreground", semanticTag:"flowers",
+  transform {x:6,y:45,scale:1,rotation:0}
+- shapes: small circles + stems (optional)
+
+Wire these steps to buttons in ManualConsole.
+
+────────────────────────────────────────────────────────
+STOP CONDITION (Definition of Done)
+────────────────────────────────────────────────────────
+STOP when:
+- Demo steps build a coherent countryside scene similar to expected reference:
+  sky top band, field bottom band, mountains on horizon, sun visible,
+  path thick and winding, tree+house grounded, birds+flowers visible.
+- Preview tree is ghosted (opacity 0.35 + dashed box + label) and commit makes solid.
+- Manual console validates + applies envelopes with Zod.
+- Debug panel shows scene JSON, last envelope JSON, render/apply ms.
+- No changes were made outside client/src/**.

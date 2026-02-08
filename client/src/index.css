@@ -1,0 +1,84 @@
+:root {
+  --bg-base: #f3eee6;
+  --bg-top: #faf6ef;
+  --bg-bottom: #ede4d7;
+
+  --panel-surface: rgba(255, 255, 255, 0.78);
+  --panel-border: rgba(17, 24, 39, 0.1);
+  --canvas-surface: #fbf7ef;
+  --canvas-edge: #e7ddcf;
+
+  --text-primary: #111827;
+  --text-secondary: #374151;
+  --text-muted: #6b7280;
+
+  --accent-teal: #0f766e;
+  --accent-teal-hover: #115e59;
+  --accent-amber: #d97706;
+
+  --success: #16a34a;
+  --warning: #fbbf24;
+  --error: #e11d48;
+  --info: #0f766e;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  width: 100%;
+  min-height: 100%;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+  background:
+    linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%),
+    radial-gradient(65% 42% at 18% 8%, rgba(217, 119, 6, 0.08), transparent 68%),
+    radial-gradient(56% 38% at 82% 12%, rgba(15, 118, 110, 0.07), transparent 70%),
+    var(--bg-base);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(15, 118, 110, 0.2);
+  color: var(--text-primary);
+}
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(17, 24, 39, 0.06);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.2);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(17, 24, 39, 0.28);
+}

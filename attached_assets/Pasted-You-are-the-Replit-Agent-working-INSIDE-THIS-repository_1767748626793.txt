@@ -1,0 +1,178 @@
+You are the Replit Agent working INSIDE THIS repository.
+
+ABSOLUTE RULES (DO NOT BREAK THE PROJECT)
+- Make the smallest possible changes.
+- Do NOT refactor, rename folders/files, or reformat large files.
+- Do NOT loosen shared Zod schemas.
+- Do NOT change the WebSocket protocol or message shapes.
+- Keep server-authoritative canonical state.
+- Only change code required for the acceptance criteria.
+- After EACH step: run vitest, fix failures, ensure no TS errors.
+
+====================================================
+PHASE A GOALS / ACCEPTANCE
+====================================================
+
+A1) Stop schema_validation_failed: commands[0].patch Required
+- If Gemini outputs update_* without patch wrapper, server must repair it BEFORE Zod validation.
+
+A2) “move X” must work consistently (committed OR preview)
+- update_preview_object must still apply to committed objects (coerce).
+- update_object must still apply to preview objects if id exists.
+- Transform patches must be clamped server-side so client never drops scene_update.
+
+A3) Fix sun line schema failures
+- If a line uses x1/y1/x2/y2, normalize to points[] BEFORE Zod validation.
+
+A4) Remove unasked “extra detail” shapes on backdrops
+- Field/paddy/sky/ground should default to clean gradients/rects only.
+- Do not add “grass tufts”, “arrows”, “rows”, “indicator” shapes unless user asked for texture/pattern/rows/details.
+
+A5) Fix thick stroke scaling in renderer
+- Ensure strokeScaleEnabled=false for stroke-based shapes so strokes don’t balloon.
+
+====================================================
+IMPLEMENT IN THIS ORDER (MINIMAL DIFFS)
+====================================================
+
+STEP 1 — Server normalization: repair missing patch (MUST-HAVE)
+Locate the Gemini command normalization pipeline (likely server/gemini/commandDirector.ts or similar).
+Add normalizeMissingPatch(cmd:any):any and run it BEFORE CommandEnvelopeSchema.parse / zod validation.
+
+Rules:
+- Applies to cmd.type === "update_object" OR "update_preview_object"
+- If cmd.patch missing/not object and cmd has top-level transform/shapes/layer/status/semanticTag,
+  move those fields into cmd.patch.
+- Recurse into batch: if cmd.type==="batch" and cmd.commands array, normalize each child.
+
+Implementation skeleton (keep minimal):
+function normalizeMissingPatch(cmd:any):any {
+  if (!cmd || typeof cmd !== "object") return cmd;
+  if (cmd.type === "batch" && Array.isArray(cmd.commands)) {
+    return { ...cmd, commands: cmd.commands.map(normalizeMissingPatch) };
+  }
+  const isUpdate = cmd.type === "update_object" || cmd.type === "update_preview_object";
+  if (!isUpdate) return cmd;
+
+  const patch:any = { ...(cmd.patch && typeof cmd.patch==="object" ? cmd.patch : {}) };
+  if (cmd.transform && !patch.transform) patch.transform = cmd.transform;
+  if (cmd.shapes && !patch.shapes) patch.shapes = cmd.shapes;
+  if (cmd.layer && !patch.layer) patch.layer = cmd.layer;
+  if (cmd.status && !patch.status) patch.status = cmd.status;
+  if (cmd.semanticTag && !patch.semanticTag) patch.semanticTag = cmd.semanticTag;
+
+  if (Object.keys(patch).length === 0) return cmd;
+
+  const { transform, shapes, layer, status, semanticTag, ...rest } = cmd;
+  return { ...rest, patch };
+}
+
+STEP 2 — Normalize line shapes x1/y1/x2/y2 => points[]
+Still in the SAME normalization stage (before Zod validation).
+Create helper normalizeLineShape(shape:any):any:
+- if shape.type==="line"
+- and shape.points missing
+- and numeric x1,y1,x2,y2 exist
+=> set shape.points=[x1,y1,x2,y2] and delete x1..y2.
+
+Apply this mapping to:
+- add_object/add_preview_object: object.shapes[]
+- update_object/update_preview_object: patch.shapes[] when present
+- nested inside batch commands too
+
+STEP 3 — Coerce update_preview_object targeting committed objects
+Find server-side applyCommand/applyCommands that mutates canonical scene.
+Add rule:
+- If command.type==="update_preview_object"
+  and target scene.objects[id] exists
+  and target.status==="committed"
+=> treat as update_object with same id + patch.
+Also, if update_object targets a preview object, still apply (do not reject).
+
+STEP 4 — Server-side clamp transforms after applying patches
+After applying a transform patch, clamp:
+- x,y: 0..100
+- scale: 0.1..3
+- rotation: -180..180
+Keep deterministic behavior and do not touch schemas.
+
+STEP 5 — Remove unasked backdrop details on creation ONLY
+Add post-process filter that runs ONLY for add_object/add_preview_object before scene insertion:
+
+function wantsTexture(utterance:string){
+  return /\b(texture|pattern|rows|row|detailed|details|tufts|rice|plants)\b/i.test(utterance);
+}
+
+function simplifyBackdrop(obj:any, utterance:string){
+  const tag = String(obj?.semanticTag ?? "").toLowerCase();
+  const isBackdrop = ["sky","field","grass","ground","paddy_field","water","sand","backdrop","background_backdrop"].includes(tag);
+  if (!isBackdrop) return obj;
+  if (wantsTexture(utterance)) return obj;
+
+  const rect = (obj.shapes ?? []).find((s:any)=>s?.type==="rect");
+  if (!rect) return obj;
+  return { ...obj, shapes: [rect] };
+}
+
+Apply simplifyBackdrop() ONLY for creation commands (add_object/add_preview_object).
+Do NOT rewrite existing objects globally.
+This should remove grass_tuft_* and paddy_detail_* by default.
+
+STEP 6 — Client renderer: prevent stroke scaling
+Find the Vue + Konva renderer that converts VectorShape to Konva nodes props.
+For any shape with stroke OR types line/path/polyline/polygon:
+set strokeScaleEnabled: false in Konva props.
+
+Do not refactor renderer; just add this prop.
+
+STEP 7 — Prompt hardening (safe)
+In server/gemini/cache.ts system instruction:
+- Add explicit example showing required patch shape:
+{
+  "commands": [{
+    "type": "update_object",
+    "id": "obj_house_123",
+    "patch": { "transform": { "x": 10, "y": 46, "scale": 1.2, "rotation": 0 } }
+  }]
+}
+- Add rule: “Do not output x1/y1/x2/y2; use points array for line.”
+- Add rule: “Do not add indicator/arrow/annotation shapes unless user asked.”
+- Add rule: “Do not add texture/tufts/rows to backdrops unless asked.”
+
+Do NOT attempt to wire JSON Schema constraints into the Gemini SDK in Phase A.
+
+====================================================
+TESTS (MINIMAL BUT REQUIRED)
+====================================================
+
+Add vitest tests for pure logic (wherever this repo already runs tests):
+1) normalizeMissingPatch:
+   input update_object with top-level transform => output includes patch.transform, no top-level transform.
+2) normalizeLineShape:
+   input line with x1..y2 => output line.points array, x1..y2 removed.
+3) simplifyBackdrop:
+   - utterance “add a field” => keep only first rect
+   - utterance includes “texture” => keep rect + detail shapes
+4) coercion:
+   - scene has committed obj; apply update_preview_object => transform updated.
+
+If server tests aren’t currently configured, place tests in a location vitest already picks up,
+and test these functions in isolation (export helpers if needed but keep changes minimal).
+
+====================================================
+RUN
+====================================================
+- Run the existing test command (check package.json). Usually: npx vitest run
+- Ensure no TS errors.
+
+====================================================
+DELIVERABLE
+====================================================
+At the end print:
+1) files changed
+2) short description per step
+3) manual verification:
+   - add field -> move field up/down (no schema errors)
+   - commit all -> move house left (works)
+   - add sun with rays (if produced) -> no schema failure
+   - backdrop shapes are clean unless texture requested

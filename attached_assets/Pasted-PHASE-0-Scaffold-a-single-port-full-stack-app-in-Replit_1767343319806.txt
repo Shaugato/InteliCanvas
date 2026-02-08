@@ -1,0 +1,63 @@
+PHASE 0 — Scaffold a single-port full-stack app in Replit (Web app template) using Vue.
+
+Goal:
+One Replit project that runs:
+- Node server (TypeScript, Express, ws)
+- Vue client (Vue 3 + Vite + TypeScript)
+- ONLY ONE externally exposed port (the Node server)
+- Server listens on 0.0.0.0 and port = process.env.PORT || 3000
+- Dev mode: Node is the only server bound to the external port; it mounts Vite in middleware mode (no separate Vite port)
+- Prod mode: server serves /client/dist static assets
+
+CRITICAL: NO REACT
+- Do NOT use React anywhere.
+- If any existing React files/dependencies exist in this repl (react, react-dom, @vitejs/plugin-react, JSX/TSX), remove them.
+- Ensure the client is a Vue project (createApp + App.vue).
+
+Create folders:
+- /client (Vue 3 + TS + Vite)
+- /server (Node + TS + Express + ws)
+- /shared (TS types shared by both)
+
+Hard rules:
+- Do NOT create a second server that listens on another port.
+- Do NOT put any API keys in the client.
+- Read secrets from process.env only (server-side).
+
+Server requirements:
+- GET /api/health -> { ok: true }
+- WebSocket endpoint /ws:
+  - When server receives JSON { "type": "ping" } it responds with { "type": "pong" }
+- Bind to 0.0.0.0 and use process.env.PORT
+- In dev, use Vite middlewareMode so the Node server serves the client through the same port
+- In prod, serve static files from /client/dist and fallback to index.html
+
+Client UI requirements - in a creative way:
+- Show “Canvas loading…”
+- Show WebSocket status: connected/disconnected
+- Button “Send ping” that sends {type:"ping"} over WS
+- Display last received message (should show pong)
+
+Root scripts:
+- npm run dev -> starts server in dev mode (Vite middleware included)
+- npm run build -> builds shared + client + server
+- npm start -> runs production server serving built client
+
+Replit config:
+- Add a .replit file with run = "npm run dev" (or ensure Run triggers npm run dev)
+
+Deliverables:
+- A working monorepo or workspace setup (npm workspaces preferred)
+- README with:
+  - How to run in Replit
+  - Required env vars (GEMINI_API_KEY, APP_ENV, PUBLIC_BASE_URL)
+  - Note: secrets must be set in Replit Secrets, not in code
+- Verify Vue wiring:
+  - client/package.json includes "vue" and "@vitejs/plugin-vue"
+  - client/package.json does NOT include react/react-dom/@vitejs/plugin-react
+Stop after it works in Replit webview.
+
+Definition of Done (must verify):
+- Replit Run opens webview successfully
+- /api/health returns {"ok": true}
+- WebSocket connects and ping/pong works from the UI

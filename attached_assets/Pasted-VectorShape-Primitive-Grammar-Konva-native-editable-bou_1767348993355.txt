@@ -1,0 +1,232 @@
+VectorShape Primitive Grammar (Konva-native, editable, bounded)
+Goal
+
+Upgrade the SceneGraph contract from semantic geometry objects to a vector-primitive grammar that maps 1:1 to Konva nodes, enabling:
+
+generic rendering (no object-specific renderers)
+
+fine-grained voice edits (“make the left wing longer”)
+
+future arbitrary objects (dragon, logo, diagram, UI mockups)
+
+strict bounds to keep Gemini reliable and fast
+
+This is still a contracts-only phase.
+Do NOT add rendering logic or UI code.
+
+Global Rules
+
+Modify only /shared schemas and existing Phase-1 tests if required
+
+Do NOT add servers, ports, or client code
+
+Keep validation strict
+
+Keep everything serializable + deterministic
+
+SceneGraph must remain replayable
+
+1️⃣ Introduce VectorShape primitive grammar
+Create /shared/vectorShapes.ts (or inline in scene.ts if preferred)
+
+Define a discriminated union VectorShapeSchema with type as discriminator.
+
+Supported primitives (must map 1:1 to Konva nodes)
+
+rect
+
+circle
+
+ellipse
+
+line
+
+polyline
+
+polygon
+
+path (SVG d string OR structured segments)
+
+text
+
+Shared shape fields (ALL shapes must include)
+{
+  id: string,                // stable, used for editing
+  role?: string,             // semantic hint: "wing_left", "roof", "trunk"
+  opacity?: 0..1,
+  fill?: string,
+  stroke?: string,
+  strokeWidth?: 0..20,
+}
+
+Shape-specific schemas
+rect
+{ type:"rect", x, y, width, height, cornerRadius? }
+
+circle
+{ type:"circle", x, y, radius }
+
+ellipse
+{ type:"ellipse", x, y, radiusX, radiusY }
+
+line
+{ type:"line", points: number[] } // even count
+
+polyline / polygon
+{
+  type:"polyline" | "polygon",
+  points: number[],            // capped length
+  closed?: boolean             // for polyline only
+}
+
+path
+
+Choose one representation (prefer SVG string for now):
+
+{
+  type:"path",
+  d: string                    // SVG path data
+}
+
+text
+{
+  type:"text",
+  x, y,
+  text: string,
+  fontSize?: 6..96,
+  fontFamily?: string,
+  align?: "left"|"center"|"right"
+}
+
+2️⃣ Enforce complexity limits (CRITICAL)
+
+Add hard caps directly in Zod schemas:
+
+maxShapesPerObject ≤ 60
+
+maxPointsPerPoly ≤ 200 numbers
+
+maxTextLength ≤ 80 characters
+
+path.d.length ≤ 800 characters
+
+Reject validation if exceeded.
+
+These limits prevent:
+
+giant arrays
+
+slow rendering
+
+runaway Gemini outputs
+
+3️⃣ Modify SceneObject to be “group of shapes”
+Replace geometry-based SceneObject with this structure
+SceneObject = {
+  id: string,
+  status: "preview" | "committed",
+  layer: "sky" | "ground" | "background" | "foreground",
+  transform: {
+    x: 0..100,
+    y: 0..100,
+    scale: 0.1..3,
+    rotation: -180..180
+  },
+  semanticTag?: "tree" | "house" | "mountain" | "sun" | "birds" | "flowers" | "bush" | "path" | "sky" | "field",
+  shapes: VectorShape[]
+}
+
+
+Rules:
+
+shapes.length must be ≥ 1
+
+shapes.length ≤ maxShapesPerObject
+
+semanticTag is OPTIONAL and purely descriptive
+
+Rendering depends only on shapes
+
+4️⃣ Update /shared/scene.ts
+
+Remove old GeometrySchema
+
+Import or define VectorShapeSchema
+
+Update SceneObjectSchema accordingly
+
+Keep:
+
+PointSchema
+
+TransformSchema
+
+GradientSchema
+
+StyleSchema (used at shape level now)
+
+SceneGraphSchema remains unchanged structurally
+
+Export:
+
+VectorShapeSchema
+
+SceneObjectSchema
+
+SceneGraphSchema
+
+inferred types
+
+5️⃣ Update /shared/commands.ts (minimal changes)
+
+Commands still operate on SceneObject
+
+Preview/commit rules remain unchanged
+
+Patch rules remain:
+
+must NOT allow id or type mutation
+
+Patches may update:
+
+transform
+
+layer
+
+status
+
+shapes (full replace or partial edit)
+
+Do NOT introduce per-shape commands yet (that comes later).
+
+6️⃣ Update tests (light touch)
+
+Update existing Phase-1 test data so that:
+
+Valid envelope uses shapes: [ { type:"circle", ... } ]
+
+Invalid coordinate test still fails
+
+Preview status test still fails
+
+ID mutation test still fails
+
+Add one extra assertion:
+
+object with shapes.length > maxShapesPerObject is rejected
+
+Definition of Done
+
+Stop when:
+
+TypeScript builds
+
+All Phase-1 tests still pass
+
+New VectorShape schema validates correctly
+
+Complexity caps are enforced
+
+SceneObject is now a generic shape group
+
+No rendering code added

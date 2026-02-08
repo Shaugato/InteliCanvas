@@ -1,0 +1,135 @@
+PHASE 4 — Make server authoritative and define WS protocol.
+
+Goal
+Server holds the canonical session state (SceneGraph + SessionEvents) and broadcasts updates to ALL connected clients.
+Client becomes a renderer of server state only (no double-applying).
+
+Hard rules
+- Keep the existing single-port Replit setup.
+- All WS messages must be Zod-validated.
+- WS protocol must support SceneObject.shapes: VectorShape[] (from Phase 1).
+- Client must NOT apply reducer to canonical state anymore; it only renders server-provided scene_update.
+
+1) Shared: define WS protocol in /shared/ws.ts
+Create /shared/ws.ts and export:
+- ClientToServerMessageSchema (discriminated union by "type")
+- ServerToClientMessageSchema (discriminated union by "type")
+- Types inferred from Zod
+
+Client -> Server message types (minimum payloads):
+- submit_utterance: { type:"submit_utterance", utterance: string, clientEventId?: string }
+- request_director_pass: { type:"request_director_pass" }
+- toggle_textures: { type:"toggle_textures", enabled: boolean }
+- final_render: { type:"final_render" }
+
+Server -> Client message types:
+- transcript_partial: { type:"transcript_partial", text: string }
+- transcript_final: { type:"transcript_final", text: string }
+- command_envelope: { type:"command_envelope", envelope: CommandEnvelope }
+- scene_update: {
+    type:"scene_update",
+    sceneGraph: SceneGraph,
+    sessionEvents: SessionEvent[],
+    activePreviewIds: string[],
+    revision: number
+  }
+- status: { type:"status", message: string, level?: "info"|"warn"|"error" }
+- error: { type:"error", message: string, code?: string }
+
+Validation notes:
+- Import SceneGraphSchema, CommandEnvelopeSchema, SessionEventSchema from /shared (Phase 1/3).
+- scene_update must validate SceneGraph including VectorShape[] inside SceneObject.shapes.
+- Keep message payloads small; no images yet in Phase 4.
+
+2) Server: canonical in-memory state + broadcast hub
+In server WS handling (existing /ws endpoint):
+Maintain a single in-memory canonical state object, e.g.
+- canonicalSceneGraph: SceneGraph (start with createEmptyScene())
+- canonicalSessionEvents: SessionEvent[] (initially [])
+- activePreviewIds: Set<string> (track preview object ids currently present/active)
+- revision: number (increment on every applied change)
+- clients: Set<WebSocket>
+
+On client connect:
+- add socket to clients set
+- immediately send a scene_update with current canonical state + revision
+- send status "connected"
+
+On client disconnect:
+- remove from clients set
+
+Broadcast helper:
+- broadcast(message) to all open sockets
+- safe-send with try/catch and readyState checks
+
+3) Server behavior: submit_utterance (stub for now)
+Implement handler for client->server submit_utterance:
+
+Steps:
+A) Validate incoming message with ClientToServerMessageSchema.
+B) Broadcast transcript_final immediately (since we’re stubbing Live for now):
+   - transcript_final { text: utterance }
+C) Generate a STUB CommandEnvelope (no Gemini yet):
+   - simplest approach:
+     - If utterance includes keywords like "tree", "house", "mountain", etc,
+       pick from a small set of prebuilt demo envelopes (you already have demoEnvelopes from Phase 2),
+       or create one or two fixed envelopes that add/update objects.
+     - Otherwise return an envelope with notes like "stub: no-op" and commands: [].
+
+D) Validate the produced envelope using CommandEnvelopeSchema.
+   - If invalid: broadcast error and STOP (do not mutate canonical state).
+E) Apply commands to canonicalSceneGraph using the Phase 3 pure reducer:
+   - canonicalSceneGraph = applyCommands(canonicalSceneGraph, envelope.commands)
+F) Create a SessionEvent and append to canonicalSessionEvents:
+   - id, timestamp, utterance, commands/envelope, status="applied", notes, latencyMs
+G) Update activePreviewIds:
+   - recompute from canonicalSceneGraph.objects where status="preview"
+     OR update incrementally if you prefer, but recompute is safer for now.
+H) revision++
+I) Broadcast in order:
+   1) command_envelope (so UI/log can show what was applied)
+   2) scene_update (sceneGraph + sessionEvents + activePreviewIds + revision)
+
+4) Client changes: render server state only
+Update the client so it no longer owns canonical state via reducer history.
+
+Client requirements:
+- WebSocket connects to /ws.
+- Incoming messages are validated with ServerToClientMessageSchema.
+- On scene_update:
+  - replace the client’s displayed SceneGraph with sceneGraph from server
+  - replace the timeline/session events UI with sessionEvents from server
+  - store revision and display it (optional but helps debugging)
+- Remove/disable any local “applyCommands(scene, envelope.commands)” on the canonical scene.
+  - Manual Command Console must NOT apply locally.
+  - If you keep Manual Command Console for debug, change it to:
+    - send submit_utterance OR
+    - send a special dev-only message (optional) but keep Phase 4 scope minimal.
+
+Add minimal UI for Phase 4 testing:
+- Text input + button “Submit utterance”
+  -> sends {type:"submit_utterance", utterance}
+- WS status indicator still visible
+- Show last transcript_final somewhere small
+- Show that canvas changes happen ONLY after scene_update arrives
+
+5) Multi-tab sync test (Definition of Done)
+Test procedure:
+- Open two browser tabs to the same Replit app URL.
+- In Tab A, submit utterance “add a tree on the left” (or your stub keyword).
+- Verify:
+  - Both tabs receive the same scene_update revision increment
+  - Both canvases match visually
+  - Timeline/sessionEvents list matches in both tabs
+  - No double-apply bugs (objects don’t duplicate, positions don’t drift)
+
+Stop condition (IMPORTANT)
+STOP when multi-tab sync works reliably:
+- Two browser tabs stay in sync
+- Server broadcast works reliably
+- Client renders server state only (no double applying)
+
+Common failure modes to avoid
+- Client applies reducer locally AND server also applies -> duplicated objects.
+- Not sending initial scene_update on connect -> new tab shows blank.
+- Skipping Zod validation -> malformed messages crash UI.

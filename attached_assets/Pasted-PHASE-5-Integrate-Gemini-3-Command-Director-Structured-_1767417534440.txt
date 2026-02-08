@@ -1,0 +1,211 @@
+PHASE 5 — Integrate Gemini 3 Command Director (Structured Outputs + Thinking Router + Prompt/Schema Caching)
+
+Context (current state)
+- Phases 0–4 are done.
+- Server is canonical + broadcasts scene_update; client renders server scene only.
+- submit_utterance currently uses a stub envelope (e.g., findStubEnvelope / keyword matching).
+- Shared Zod schemas exist for CommandEnvelope and SceneGraph, plus exported JSON schema (or can be exported).
+
+Outcome
+Natural language utterances -> ALWAYS schema-valid CommandEnvelope (or refused=true), fast for live drawing:
+- LIVE_DRAW: thinking low/medium (fast)
+- COMPOSITION_PASS: thinking high (slower but smarter)
+- FINAL_RENDER_PLAN: thinking high (planning only, no image generation yet)
+- Cache heavy prompt+schema once, reuse across turns (remote cache if supported; always do local prebuild cache).
+
+Hard rules
+1) Gemini API key stays server-side only. NEVER put GEMINI_API_KEY in client.
+2) Gemini output must be JSON schema locked to CommandEnvelope. No freeform text.
+3) If uncertain / ambiguous / would violate schema or bounds, return { refused: true, refusalReason, notes } instead of guessing.
+4) Do NOT send full scene JSON to Gemini every turn. Use a compact scene summary string.
+5) Server remains authoritative: apply commands on server -> broadcast scene_update.
+
+Files to create (server)
+- /server/gemini/router.ts
+- /server/gemini/cache.ts
+- /server/gemini/commandDirector.ts
+- (optional) /server/gemini/prompts.ts for long system prompt text
+
+Files to modify
+- /server/route.ts (or wherever submit_utterance handler lives) to replace stub with Gemini Director
+- /shared schemas ONLY if required (see “Phase 5 schema sanity” below)
+
+============================================================
+1) Implement /server/gemini/router.ts
+============================================================
+Export:
+- type IntentType = "LIVE_DRAW" | "COMPOSITION_PASS" | "FINAL_RENDER_PLAN"
+- function classifyIntent(utterance: string): IntentType
+- function thinkingFor(intent: IntentType, utterance: string): "low" | "medium" | "high"
+
+Heuristics (simple + deterministic):
+- FINAL_RENDER_PLAN if utterance contains: "final render", "finalize", "cinematic", "export", "make it a painting", "render plan"
+- COMPOSITION_PASS if utterance contains: "improve composition", "make it look better", "balance", "contrast", "director pass", "tweak layout"
+- else LIVE_DRAW
+
+Thinking:
+- LIVE_DRAW -> low by default; medium if utterance is long (e.g., >120 chars) or contains multi-step words ("and", "also", "then") or mentions 3+ objects.
+- COMPOSITION_PASS, FINAL_RENDER_PLAN -> high
+
+============================================================
+2) Implement /server/gemini/cache.ts
+============================================================
+Goal: prepare and reuse static prompt parts across turns.
+
+Export:
+- type GeminiPromptCache = {
+    ok: boolean;
+    createdAt: number;
+    mode: "REMOTE" | "LOCAL_ONLY";
+    cacheId?: string;      // if remote caching supported
+    systemInstruction: string; // always prebuilt locally
+    schemaJson: object;        // CommandEnvelope JSON schema
+  }
+- async function initGeminiCache(): Promise<GeminiPromptCache>
+- function getGeminiCache(): GeminiPromptCache
+
+Behavior:
+- On server startup (or first request), build:
+  A) systemInstruction: “You are a DrawingCommand generator” + rules:
+     - ONLY output JSON matching schema.
+     - Only valid primitives (VectorShape union) inside object.shapes.
+     - Respect bounds: x/y 0..100, scale 0.1..3, rotation -180..180.
+     - Preview workflow examples (3 short examples): add_preview_object -> update_preview_object -> commit_preview_object.
+     - Composition rules: horizon band (~45), avoid overlap, depth scaling, ground anchoring.
+     - Refusal policy: if ambiguous target or illegal change -> refused=true.
+
+  B) schemaJson: the CommandEnvelope JSON schema.
+     - Prefer importing an existing exported JSON schema from /shared if it exists.
+     - If not available, add a tiny helper in /shared to export JSON schema (zod-to-json-schema) and import it here.
+
+- Attempt REMOTE caching only if the Gemini SDK supports it in this project.
+  - If remote cache creation fails (or SDK lacks it), log a warning and continue with LOCAL_ONLY.
+  - Must log: cache mode + cacheId if any.
+
+============================================================
+3) Implement /server/gemini/commandDirector.ts
+============================================================
+Use @google/genai (or the existing Gemini SDK already installed in this repo).
+
+Export:
+- type DirectorInput = {
+    utterance: string;
+    sceneSummary: string;
+    previewContext: string;
+    intentType: "LIVE_DRAW" | "COMPOSITION_PASS" | "FINAL_RENDER_PLAN";
+  }
+- type DirectorResult = {
+    envelope: CommandEnvelope;    // validated
+    latencyMs: number;
+    validated: boolean;
+    refusal?: { reason: string };
+    rawText?: string;            // only for debugging if model misbehaves (do not apply)
+  }
+- async function generateCommandEnvelope(input: DirectorInput): Promise<DirectorResult>
+
+Implementation details:
+A) Build compact inputs:
+- sceneSummary: short, one line per object:
+  id, semanticTag (or "tag"), layer, status, transform(x,y,scale), keyStyle (fill/stroke/strokeWidth), shapesCount.
+- plus scene intent string (or "intent: none").
+- DO NOT include full shapes arrays unless absolutely necessary.
+
+- previewContext:
+  - activePreviewIds (from server canonical set)
+  - if exactly one active preview, label it as "activePreviewId=..."
+  - “If user says commit, commit activePreviewId.”
+
+B) Gemini request must be schema-locked JSON:
+- response_mime_type should be application/json (or equivalent in your SDK)
+- response_schema / jsonSchema should be the CommandEnvelope schemaJson from cache
+- include systemInstruction from cache
+- include user message containing: utterance + sceneSummary + previewContext + intentType rules
+
+C) Validate every response:
+- Parse JSON, validate with CommandEnvelopeSchema from /shared.
+- If validation fails:
+  - Return a safe refused envelope:
+    { refused: true, refusalReason: "schema_validation_failed", notes: "I couldn't produce a valid command envelope. Please rephrase." , commands: [] }
+  - Log validation errors.
+
+D) Refusal policy:
+- If Gemini returns refused=true, DO NOT apply commands. Broadcast status/notes to client.
+- If Gemini returns commands that target ambiguous objects without ids (and your schema allows targeting by id only), Gemini should refuse. If it doesn’t, reject and refuse.
+
+============================================================
+4) Phase 5 schema sanity (shared)
+============================================================
+Verify /shared command schemas enforce the “only valid primitives” rule:
+
+- add_object must include: full SceneObject with shapes: VectorShape[]
+- add_preview_object must include: full SceneObject with shapes: VectorShape[]
+- update_preview_object / update_object can patch transform/style and MUST NOT mutate object id/layer/type/status illegally.
+
+If current command schemas still assume “semantic geometry” or omit shapes:
+- Update /shared/commands.ts + Zod schemas accordingly.
+- Update reducer applyCommand/applyCommands ONLY if required to support the corrected command payload.
+- Keep changes minimal to avoid breaking Phase 4 WS protocol.
+
+Optional extension (DO NOT block Phase 5 success):
+- Add new commands to /shared (and reducer support):
+  - add_shape (objectId, shape: VectorShape)
+  - update_shape (objectId, shapeId, patch)
+  - delete_shape (objectId, shapeId)
+Only implement if everything else is working; otherwise leave as TODO comments.
+
+============================================================
+5) Replace Phase 4 stub with Gemini Director (server)
+============================================================
+In submit_utterance handler:
+- Build sceneSummary + previewContext from canonical server state
+- intentType = classifyIntent(utterance)
+- Start timer
+- call generateCommandEnvelope(...)
+- Log:
+  - intentType + thinking level
+  - cache mode (REMOTE/LOCAL_ONLY)
+  - utterance->commands latencyMs
+  - validation pass/fail
+  - refused reason if any
+- If refused:
+  - broadcast server->client status message (and/or command_envelope with refused=true)
+  - DO NOT applyCommands
+- Else:
+  - applyCommands to canonical scene
+  - broadcast command_envelope + scene_update
+
+============================================================
+6) Add lightweight tests (fast)
+============================================================
+Add a small test file (vitest or existing test runner used in repo):
+- router.test.ts: phrases classify correctly
+- director.safeRefusal.test.ts:
+  - if JSON parsing fails -> refused envelope returned
+  - if schema validation fails -> refused envelope returned
+
+(Do not test real Gemini calls in unit tests.)
+
+============================================================
+Stop / Definition of Done
+============================================================
+Stop when:
+- I can type 10 consecutive utterances and EVERY server response is either:
+  (A) a schema-valid CommandEnvelope with commands that apply cleanly, OR
+  (B) refused=true with a clear refusalReason,
+  and the server never crashes and never broadcasts invalid scene updates.
+
+Manual sample workflow must work:
+1) “Add a big tree on the left” -> add_preview_object or add_object (your choice, prefer preview flow)
+2) “move it a bit left and thicker” -> update_preview_object (or update_object) adjusting transform/style
+3) “commit it” -> commit_preview_object
+
+Performance expectations:
+- LIVE_DRAW should feel fast (thinking low/medium).
+- COMPOSITION_PASS / FINAL_RENDER_PLAN should be noticeably slower but smarter (thinking high).
+- Cache creation and reuse must be logged.
+
+Common failure modes to avoid
+- Sending full scene JSON each turn (slow) -> always use compact summaries
+- Not pinning schema -> model returns prose and breaks pipeline
+- Applying refused/invalid outputs -> never apply unless validated
+- Client doing canonical apply -> client renders server scene_update only

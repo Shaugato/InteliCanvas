@@ -1,0 +1,138 @@
+You are working in a Vue + Konva project with a shared Zod schema SceneGraph (0..100 world coords) and a server-authoritative WebSocket pipeline. The canvas uses layers (sky/background/ground/foreground) and an explicit scene.order array for deterministic render ordering and replay.
+
+We have multiple issues:
+1) Layering bug: Sun and mountains sometimes render BEHIND the sky (sky covers them).
+2) Intent rules: Sky should default to the TOP band (y=0..HORIZON_Y), grass/field should default to the BOTTOM band (y=HORIZON_Y..100), and both should span full width (x=0..100) unless explicitly overridden.
+3) Override intent: If user explicitly says “cover the whole canvas / full screen / top to bottom”, allow backdrops to span y=0..100.
+4) Gradients look like stripes because we approximate them with stacked rect bands. We need true smooth gradients using Konva native gradient props.
+5) Realism + generality: The system must produce the MOST realistic possible objects using vector primitives for ANY requested object type (not just trees). If the user asks “draw a tree/dragon/car/person/house/etc”, we should generate a credible silhouette using available primitives (rect/circle/ellipse/line/polyline/polygon/path/text), with reasonable proportions, angles, thickness, and small details—while respecting shape-count limits and determinism.
+
+Constraints:
+- Do NOT change CommandEnvelope shape or command types.
+- Keep determinism: scene.order is authoritative; changes must be replayable.
+- Keep bounds: coords 0..100, scale 0.1..3, rotation ±180.
+- MaxShapesPerObject <= 60. Max poly points <= 200. Max path length <= 800.
+- Minimal comments; only where necessary.
+- Prefer strict Zod validation. Renderer can assume validated inputs.
+
+Implement changes across: shared schema, renderer, server/reducer ordering, and CommandDirector post-processing.
+
+A) FIX LAYERING (most critical)
+1) Confirm Konva render stack order:
+   Back-to-front must be:
+   - sky (backdrop lowest)
+   - background
+   - ground
+   - foreground
+   - preview overlay
+   Fix if current grouping draws sky after other layers.
+2) Deterministic ordering inside a layer:
+   - Backdrop objects must render behind non-backdrop objects in the same layer.
+   - Backdrop semanticTags include: ["sky","field","grass","ground","water","sand","background_backdrop"].
+3) Enforce deterministic insertion into scene.order on add_object/add_preview_object/commit_preview_object:
+   Stable sort key:
+     layerRank: sky=0, background=1, ground=2, foreground=3
+     backdropRank: backdrop=0, normal=1
+     then stable relative order.
+   This prevents “I added sky later and it covered everything”.
+Implement ordering in canonical applyCommands (server-authoritative), not just client.
+
+B) INTENT-BASED BACKDROP PLACEMENT (Sky/Grass defaults + overrides)
+1) Director/system instructions + post-processing treat “sky/field/grass” as backdrops:
+   - Default sky spans y=0..HORIZON_Y, x=0..100.
+   - Default grass/field spans y=HORIZON_Y..100, x=0..100.
+2) Override rule:
+   - If utterance contains explicit full-canvas intent (“whole/full/entire canvas”, “top to bottom”, “cover screen”, “fill canvas”), allow backdrop to span y=0..100.
+3) Seam rule when both sky and ground backdrops exist:
+   - If user says “make sky start where grass ends” ensure no overlap by snapping seam.
+   - If user does NOT specify, keep HORIZON_Y seam.
+
+C) TRUE GRADIENT SUPPORT (remove stripe problem)
+1) Extend VectorShape schema to support Konva gradients:
+   - fillLinearGradientStartPoint {x,y}
+   - fillLinearGradientEndPoint {x,y}
+   - fillLinearGradientColorStops array [stop,color,stop,color...] with stop in [0..1]
+   Optional:
+   - fillRadialGradientStartPoint / EndPoint, startRadius/endRadius, colorStops (for sun glow)
+   Validate: even-length stops; numeric stops in [0..1]; colors are strings.
+2) Update Konva renderer to map these props to Konva nodes (Rect/Circle/Ellipse/Path/etc).
+3) Update Director prompt: when user requests “soft/smooth/gradient/shade/glow”, prefer native gradients rather than band stacks.
+4) Keep fallback: if Gemini outputs banded rect stacks, optionally convert to gradients if safe.
+
+D) GENERAL REALISM ENGINE (applies to ANY object, not hard-coded to trees)
+We need a robust, generic method that turns vague object requests into credible vector drawings using primitives, within constraints.
+
+Implement a post-processing “RealismPass” in CommandDirector that:
+1) Detects “low-quality” outputs:
+   - Object has too few shapes for its semanticTag complexity (e.g., tree=1 circle, house=1 rect, person=1 circle).
+   - Shapes have absurd proportions (e.g., width/height extremely tiny/huge vs typical).
+   - Or user explicitly asked “proper/realistic/actual shape”.
+2) If low-quality, apply enrichment WITHOUT changing command types:
+   - For add_object/add_preview_object: replace cmd.object.shapes with enriched shapes (same object id).
+   - For update_object/update_preview_object when user asked realism: append/adjust shapes, do not delete unless user asked remove.
+3) Use a generic “macro library” that outputs primitives but is NOT new schema types:
+   - The macro library is a pure function: (semanticTag, intentKeywords, bboxTarget) => VectorShape[]
+   - Macros should exist for common categories:
+     • natural: tree, bush, flower, cloud, mountain
+     • structures: house, door, window
+     • symbols: sun, moon, star
+     • people: person (simple silhouette with torso/head/limbs + thickness)
+     • generic fallback: if unknown tag, make a clean icon-like silhouette from polygon/path with outline.
+   - For unknown objects (e.g., “dragon”, “car”), do “icon silhouette strategy”:
+     • 1–2 polygons for body, a few lines/polylines for details (wings/wheels), optional eye dots, outline stroke.
+     • Keep shape count reasonable (<=25 by default).
+4) Proportion + geometry rules enforced by code:
+   - Normalize local bbox to start at (0,0) (you already have shiftLocalBBoxToZero).
+   - Use consistent strokeWidth for outlines (>=2) when stroke is used.
+   - Prefer symmetry when applicable (wings/arms/eyes): mirror points around a centerline.
+   - Keep angles visually reasonable (no random sharp spikes unless requested).
+   - Ensure object bbox fits its layer band via fitObjectToBands (already exists).
+5) Add a “Style Guard”:
+   - If object uses gradients, keep gradient aligned with object local bbox (top->bottom or center glow).
+   - When scaling an object, gradients must scale with it: gradient points expressed in local coords should stay within local bbox; do not generate world-sized gradients inside a small object unless it is a backdrop.
+6) Ensure determinism:
+   - No randomness. Any “generated” enrichment must be deterministic based on semanticTag + utterance keywords + object id.
+
+Important:
+- This realism pass must NOT break user intent. If user asked “simple” or “minimal”, do not enrich.
+- If user asked “convert tree into triangle”, obey user even if it’s less realistic.
+
+E) DIRECTOR PROMPT UPDATES (Gemini guidance)
+Update buildUserPrompt to strongly enforce:
+1) “Realism by default”: generate objects that look recognizable, not abstract placeholders.
+2) Use object-local coordinates for shapes; place with transform.
+3) For complex objects, prefer a small set of primitives that form a silhouette + a few details.
+4) For sky/grass: prefer gradients over bands; fill full width by default; obey overrides.
+5) Layer intent:
+   - sun must be visible above sky (same layer allowed but non-backdrop)
+   - mountains typically near horizon, background or ground depending on request
+6) Add an explicit quality checklist the model must follow before responding:
+   - “Does this object look like the requested thing?”
+   - “Is it fully on-screen?”
+   - “Is it properly layered?”
+   - “If gradient requested, did I use gradient props instead of stripes?”
+
+F) TESTS + VERIFICATION
+Add tests:
+1) If sun exists then sky added later, sun remains visible (order+render).
+2) Backdrops span correct bands by default and full width.
+3) Explicit “whole canvas” overrides band rule.
+4) Gradient schema: valid/invalid stop arrays.
+5) RealismPass:
+   - Given add_object tree with 1 circle shape, RealismPass enriches to trunk+canopy (deterministic).
+   - Given unknown object “car” with 1 rect, RealismPass enriches to silhouette with wheels (deterministic).
+6) Ensure shape count never exceeds max.
+
+Manual sanity checks:
+- “add a sky” -> smooth gradient, top band, full width
+- “add a sun” -> visible on top of sky
+- “add grass soft gradient bottom to up” -> smooth gradient, bottom band, full width
+- “make the sky cover whole canvas” -> sky spans full height
+- “add a tree with proper shapes” -> trunk + canopy
+- “draw a car” -> looks like a car silhouette with wheels, not a random rectangle
+- “draw a dragon” -> looks like a simple dragon silhouette, not nonsense
+
+Deliverables:
+- Implement changes across /shared schema, renderer, server ordering/reducer, and CommandDirector RealismPass + prompt updates.
+- Summarize each changed file + why.
+- Ensure all tests pass and new tests added pass.

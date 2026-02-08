@@ -1,0 +1,95 @@
+You are working in an existing codebase. DO NOT GUESS. You MUST identify the exact root cause with concrete evidence (logs, close codes, stack traces, failing request URLs, etc.) before making changes.
+
+Context / recap (what we built so far):
+- This project is a voice-first visual thinking canvas (Vue + Konva) with a server-authoritative scene state over WebSocket. as you alredy know
+- Existing stable WS endpoint: /ws (scene updates, transcript events, command envelopes).
+- Phase 8 adds Gemini Live streaming voice via a second WS endpoint: /ws-live.
+- Client has two voice modes: Gemini Live (preferred) and Browser SpeechRecognition (fallback).
+- We migrated SDK usage and added liveSession bridging on the server.
+- Previously we had WS upgrade conflicts (Vite HMR vs app WS). A fix was applied using noServer:true + manual upgrade routing.
+- Current problem: the platform loads stable, /ws is mostly OK, but when clicking Voice (Gemini Live), /ws-live connects briefly then disconnects repeatedly. Server logs show:
+  [Live] Client connected
+  [Live] Client disconnected
+  repeating.
+
+Your mission:
+Fix the actual, specific cause of /ws-live flapping/disconnecting when Voice is enabled, without unwanted refactors. Then add verification (smoke tests / end-to-end checks as much as possible).
+
+Hard constraints:
+1) Minimal changes. Do NOT reformat files. Do NOT rename folders. Do NOT refactor unrelated code.
+2) Preserve current API contracts and schemas in shared/liveWs.ts unless you prove they are wrong.
+3) Add targeted instrumentation logs only where needed, and keep them behind a DEBUG flag if possible.
+4) Provide a short final report: root cause, evidence, exact files changed, and how you verified.
+
+Step-by-step requirements (must follow):
+
+A) Collect evidence (MANDATORY BEFORE FIXING)
+1) Instrument server ws-live connection lifecycle:
+   - In server/routes.ts, in the /ws-live handler, log:
+     - connection established
+     - ws close code + reason (code, reason.toString())
+     - ws error stack
+     - when start_live message is received
+     - when createLiveSession begins/ends and if it throws
+   - Also log if the server is closing the socket vs client.
+2) Instrument client ws-live lifecycle:
+   - In client/src/state/liveStore.ts add logs:
+     - startLiveSession called
+     - setupAudioPipeline start / success / failure (include error.name + error.message + stack)
+     - websocket open / message / error / close (close code, reason, wasClean)
+     - when stopLiveSession closes socket
+   - These logs MUST prove whether the disconnect is caused by:
+     a) client closing due to audio pipeline failure / exception
+     b) server closing due to exception / invalid protocol / rejection
+     c) upgrade routing / path mismatch
+     d) missing static asset (/audio/pcmWorklet.js 404)
+     e) permissions / insecure context / AudioContext issues
+3) Verify static asset delivery:
+   - Confirm whether /audio/pcmWorklet.js is served successfully (200).
+   - If not, identify correct location (likely client/public/audio/pcmWorklet.js) and fix path or move file minimally.
+4) Verify the upgrade router correctness:
+   - Ensure manual upgrade handler routes *exactly* /ws and /ws-live, and does not accidentally intercept /vite-hmr.
+   - Handle querystrings safely (e.g., /ws-live?x=1 should still route).
+   - Confirm no duplicate upgrade handlers remain.
+
+B) Fix based on evidence (NO GUESSING)
+1) If the disconnect is triggered by client cleanup inside ws.onopen (e.g. setupAudioPipeline throws and stopLiveSession closes the socket):
+   - Move audio pipeline setup earlier OR adjust flow to avoid closing the WS immediately without reporting the real error.
+   - Ensure error is surfaced in UI (live overlay) and logs show the precise exception.
+2) If the server closes due to unhandled exceptions (createLiveSession throw, callbacks firing after close, etc.):
+   - Wrap createLiveSession in try/catch in routes.ts start_live handling.
+   - Ensure sessionId is cleared on error.
+   - Prevent double “disconnect/error” loops (guard with active flags).
+3) If the worklet file is missing/404:
+   - Fix file placement and/or URL. Keep naming consistent. Don’t change worklet logic unnecessarily.
+4) If the socket closes due to upgrade routing:
+   - Fix upgrade router path matching (strip query, exact match), and ensure Vite HMR path is ignored/passed through.
+
+C) Add automated verification (as much as possible)
+1) Add a lightweight smoke test script (no UI) that validates:
+   - /ws: connect -> send ping -> receive pong -> stays open for 2s -> close cleanly
+   - /ws-live: connect -> send ping_live -> receive pong_live -> stays open for 2s -> close cleanly
+2) Add a second smoke check for start_live:
+   - If LIVE API key is available in env and liveSession can connect, test:
+     - /ws-live connect
+     - send start_live
+     - receive live_status connected within timeout
+     - keep socket open for 3-5 seconds
+     - send stop_live and close cleanly
+   - If API key is NOT available, the test must skip with a clear message (not fail noisily).
+3) Run the script(s) and include outputs in your final report.
+
+D) Final deliverables
+1) Apply minimal patch.
+2) Ensure app runs: npm run dev
+3) Provide a concise report:
+   - Root cause (1-2 sentences)
+   - Evidence (specific logs: close codes, stack traces, 404 proof, etc.)
+   - Files changed (list)
+   - How verified (commands run + expected/actual outputs)
+
+Start by searching for:
+- server/routes.ts upgrade handler and wssLive connection handler
+- client/src/state/liveStore.ts ws.onopen + setupAudioPipeline + onclose
+- public/static path for /audio/pcmWorklet.js
+Then proceed strictly in the order above.

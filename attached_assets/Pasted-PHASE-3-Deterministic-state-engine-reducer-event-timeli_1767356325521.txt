@@ -1,0 +1,272 @@
+PHASE 3 — Deterministic state engine: reducer + event timeline + undo/redo (replayable simulation).
+
+Goal / Outcome
+
+Build a pure, deterministic reducer so the app behaves like a replayable simulation:
+
+event history (commands) → exact same scene, every time.
+
+Replit setup
+
+No new settings. No new ports.
+
+Hard rules (do not violate)
+
+Reducer must be pure: no in-place mutation of scene/objects/shapes arrays. Always create new arrays/objects.
+
+Deterministic ordering:
+
+scene.order is the authoritative render order for objects.
+
+scene.objects[id].shapes[] order is authoritative for shape z-order within an object.
+
+update_object / patch commands must not reorder shapes[] unless explicitly requested by a specific reorder command (we’re NOT adding reorder in Phase 3).
+
+Undo/Redo is replay-based (not inverse ops):
+
+Undo removes last applied event and rebuilds scene by replaying remaining events from a clean initial scene.
+
+Redo reapplies removed events.
+
+Must work across preview → tweak → commit flows.
+
+Implementation Checklist
+1) Add core reducer (pure functions)
+
+Create /client/src/state/reducer.ts (or similar):
+
+applyCommand(scene, command) -> newScene
+
+applyCommands(scene, commands[]) -> newScene
+
+Reducer must support the Phase-1 contract commands you already have (at minimum):
+
+set_scene_intent
+
+add_preview_object
+
+update_preview_object
+
+commit_preview_object
+
+cancel_preview_object
+
+add_object
+
+update_object
+
+delete_object
+
+any scene style commands you already use in Phase 2 (background/field/path/etc.)
+
+Important reducer details
+
+When adding objects:
+
+Insert into scene.objects
+
+Append its id to scene.order (do not sort; append is deterministic)
+
+When deleting objects:
+
+Remove from scene.objects
+
+Remove from scene.order
+
+When updating objects:
+
+Only patch allowed fields
+
+Do not reorder shapes
+
+Use immutable updates for nested data (transform, style, shapes)
+
+For preview workflow:
+
+add_preview_object must create object with status:"preview"
+
+commit_preview_object changes status to "committed" (same id unless your schema says otherwise)
+
+cancel_preview_object removes preview object cleanly (objects + order)
+
+2) Add SessionEvent timeline model
+
+Create /client/src/state/sessionEvents.ts:
+
+Define SessionEvent:
+
+id: string
+
+timestamp: number
+
+utterance: string
+
+commands: Command[] (from /shared)
+
+status: "applied" | "rejected" | "refused" | "error" (pick one enum and be consistent)
+
+notes?: string
+
+latencyMs?: number
+
+diffSummary?: string (generated after apply)
+
+Add createEvent(...) helper to generate stable ids (e.g. crypto.randomUUID()).
+
+3) Add history state + replay-based undo/redo
+
+Create /client/src/state/historyStore.ts (Pinia or a small custom store):
+
+State:
+
+baseScene: SceneGraph (initial empty scene)
+
+scene: SceneGraph (current derived scene)
+
+events: SessionEvent[] (applied timeline)
+
+redoStack: SessionEvent[] (events undone)
+
+Functions:
+
+applyEvent(utterance, envelope, latencyMs?)
+
+validate envelope using shared Zod
+
+call applyCommands(scene, envelope.commands)
+
+push SessionEvent with diffSummary
+
+clear redoStack on new apply
+
+undo()
+
+pop last event from events → push to redoStack
+
+rebuild scene = replay(baseScene, events)
+
+redo()
+
+pop from redoStack → push back to events
+
+rebuild scene = replay(baseScene, events)
+
+clear()
+
+reset events, redoStack, scene = baseScene
+
+Replay helper:
+
+replay(baseScene, events) -> SceneGraph by applying each event.commands in order.
+
+4) Diff summary generator (lightweight, shape-aware)
+
+Create /client/src/state/diffSummary.ts
+
+Implement:
+
+summarizeDiff(prevScene, nextScene, commands) -> string
+
+Keep it simple and deterministic. Examples:
+
+Added object tree_1 (12 shapes)
+
+Deleted object house_2
+
+Updated object mountain_1 transform
+
+Updated shape wing_left points
+
+Committed preview house_1
+
+Canceled preview bush_1
+
+Rules for summary:
+
+Prefer command-type-driven summaries (no heavy geometry math).
+
+If update targets shapes, mention shape id and key field changed if obvious (e.g., points/text/fill/stroke/opacity/transform).
+
+Store summary in SessionEvent.diffSummary.
+
+5) UI — Timeline + controls
+
+Update your Phase 2 UI layout to include:
+
+Controls
+
+Buttons: Undo, Redo, Clear
+
+Disable Undo when no events; disable Redo when redoStack empty.
+
+Timeline list
+
+Shows each event:
+
+timestamp (small)
+
+utterance (primary)
+
+status badge
+
+diffSummary (secondary)
+
+Event inspector
+
+Clicking an event shows:
+
+full commands JSON (pretty printed)
+
+notes / latencyMs
+
+Add “Copy JSON” button if easy.
+
+Important
+
+Renderer must render from historyStore.scene only.
+
+Manual Command Console should apply through applyEvent() so it lands in the timeline.
+
+6) Tests for determinism + preview flow undo/redo
+
+Add lightweight tests (Vitest) in /client/src/state/__tests__/history.test.ts:
+
+Test cases:
+
+Deterministic replay
+
+Apply a sequence of events
+
+Rebuild via replay
+
+Scenes deeply equal (including order and each shapes[] array ordering)
+
+Undo/redo across preview
+
+add_preview_object → update_preview_object → commit_preview_object
+
+undo step-by-step and ensure scene matches expected each time
+
+redo back to committed state
+
+No in-place mutation
+
+Verify previous scene references aren’t mutated (basic checks like prevScene !== nextScene, arrays new references)
+
+Stop condition
+
+Stop when:
+
+Timeline replay is stable.
+
+Undo/redo works reliably for preview → commit flows.
+
+Same event list always reconstructs the exact same scene.
+
+Common failure modes (avoid)
+
+Mutating arrays (push, splice) on existing scene/order/shapes objects.
+
+Accidentally sorting order or shapes (breaks determinism).
+
+Undo applying “inverse” operations instead of replay.

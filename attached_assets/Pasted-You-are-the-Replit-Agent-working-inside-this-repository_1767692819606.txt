@@ -1,0 +1,132 @@
+You are the Replit Agent working inside this repository. This project is a voice-first visual thinking canvas with:
+- Shared Zod schemas (SceneGraph, VectorShape union)
+- Server-authoritative canonical scene state with WebSocket scene_update
+- Client renderer (Vue + canvas rendering) and deterministic reducer/history
+- Objects are editable anytime (committed or preview) via update_* commands
+
+I need you to inspect the whole codebase and implement fixes for the issues below. Make changes minimal, deterministic, and schema-compliant. After each step, run tests (vitest) and fix any failures.
+
+========================
+PROBLEMS OBSERVED
+========================
+
+A) "move the field up" often does nothing.
+B) "move the house up" works sometimes before commit but not after commit (or appears to not move).
+C) Weird “curvy green half-circles” appear on the field/grass.
+D) Sometimes "draw a sun" fails schema validation because Gemini outputs line rays using x1/y1/x2/y2 instead of points[].
+E) Model sometimes adds extra “indicator” shapes (e.g. a diagonal path line for walking direction) without being asked.
+
+My research suggests:
+1) Client clamps y based on layer/horizon (ground/foreground forced below HORIZON). This makes “move up” appear broken.
+2) Client drops invalid WS messages if transforms go out of 0..100 bounds; server must clamp patches too.
+3) Strokes are being scaled up due to manual stage scaling; need non-scaling stroke for path/line/polyline/polygon.
+4) Need server-side normalization: convert line shapes with x1/y1/x2/y2 into points: [x1,y1,x2,y2] BEFORE schema validation.
+5) Preview vs committed update confusion: ensure updates can apply to committed objects anytime (convert update_preview_object -> update_object when target is committed / not in activePreviewIds).
+
+========================
+GOALS / ACCEPTANCE CRITERIA
+========================
+
+1) Any object (committed OR preview) can be moved/edited at ANY time.
+   - “move the house up” MUST visibly move even after commit.
+   - “move the field up” MUST visibly move (even above the horizon if user asks).
+2) Rendering must NOT clamp y by layer. Only global bounds 0..100 apply.
+   - Keep semantic placement rules ONLY for initial creation in server director/realism pass, not renderer clamp.
+3) Fix thick stroke issue: grass tufts should not become huge arcs/half-circles due to scaling.
+4) Fix sun schema failures: normalize line rays (x1/y1/x2/y2) into points array before Zod validation.
+5) Prevent unasked “indicator”/annotation shapes:
+   - Unless user explicitly asks for a path/arrow/indicator, do not add “path_indicator” or annotation strokes.
+6) Maintain determinism and current WebSocket protocol + Zod schemas (do not loosen schemas unless absolutely necessary).
+7) Add or update tests so these behaviors are locked in.
+
+========================
+IMPLEMENTATION TASKS
+========================
+
+Step 1 — Remove layer/horizon clamp in client renderer/composition
+- Search for client/src/canvas/composition.ts (or wherever computeFinalPosition() lives).
+- Currently it clamps y based on layer and HORIZON_Y.
+- Replace with global clamp only:
+  x = clamp(transform.x, 0, 100)
+  y = clamp(transform.y, 0, 100)
+- Ensure no other code reintroduces layer/horizon y clamping.
+
+IMPORTANT: Do NOT break the composition rules for initial creation. Keep semantic placement in server director realism pass, not in renderer clamp.
+
+Step 2 — Fix stroke scaling (non-scaling strokes)
+- Inspect the render function used to draw path/line/polyline/polygon.
+- If using SVG with manual scaling (<g transform="scale(...)">):
+  add vector-effect="non-scaling-stroke" to path/line/polyline/polygon so stroke-width stays visually sane.
+- If using Konva:
+  set strokeScaleEnabled={false} for Line/Path/Shape nodes.
+- Apply the fix to: line, polyline, polygon, path.
+- Keep geometry scaling, only prevent strokeWidth ballooning.
+
+Step 3 — Make server tolerant: preview updates must still move committed objects
+- In server canonical apply logic (server/ route.ts or wherever commands are applied):
+  - If cmd.type === "update_preview_object" but id is NOT currently in activePreviewIds (or object.status is committed),
+    convert it into type "update_object" automatically.
+  - Similarly, if cmd.type === "commit_preview_object" but id is not an active preview, ignore safely (no crash).
+- This ensures “move house up” works even if model accidentally emits update_preview_object.
+
+Step 4 — Clamp patches on the server reducer/apply (prevent WS message drops)
+- Find the server-side reducer/applyCommands or wherever patches merge into canonical sceneGraph.
+- After merging any patch.transform, clamp:
+  x,y to [0,100]
+  scale to [0.1,3]
+  rotation to [-180,180]
+- This ensures we never broadcast scene_update invalid per Zod schema.
+- Keep shared schema unchanged (still strict).
+
+Step 5 — Normalize VectorShape “line” output before validation
+- In server/gemini/commandDirector.ts (or your normalization layer before Zod parsing):
+  detect line shapes that contain x1,y1,x2,y2 fields (Gemini sometimes does that).
+  convert them into:
+    points: [x1, y1, x2, y2]
+  and remove x1/y1/x2/y2 fields.
+- Do this BEFORE running Zod validation on CommandEnvelope.
+- Add a director/system prompt rule: “Line shapes MUST use points: [x1,y1,x2,y2], never x1/y1/x2/y2.”
+
+Step 6 — Stop “indicator annotation shapes” unless asked
+- Update server director system prompt rules:
+  - Do NOT add arrows, pointer lines, path_indicator, or direction indicators unless user explicitly asks.
+  - If user says “walking towards”, represent it by posture/leg angle, not an indicator line.
+- Also add a small post-process filter:
+  - If an object semanticTag is "people" and includes a shape id containing "indicator" or a path whose purpose is annotation,
+    drop it unless utterance contains keywords like: "path", "arrow", "direction line", "indicator", "show direction".
+
+Step 7 — Backdrop consistency (optional but recommended)
+- Backdrops like sky/field/grass should be represented consistently:
+  - Use transform.y to position (sky: 0, ground: startY), and rect y=0 within the object.
+  - width always 100; height equals region height.
+- This makes movement simpler and avoids confusing "rect y=45 plus transform y=0".
+- Only do this if it doesn’t break existing tests; update tests accordingly.
+
+========================
+TESTS TO ADD / UPDATE
+========================
+
+Add/extend vitest coverage to lock these fixes:
+1) Client computeFinalPosition no longer clamps by layer/horizon.
+2) Server apply clamps transform values to schema bounds.
+3) Server converts update_preview_object to update_object when target is committed (not in activePreviewIds).
+4) CommandDirector normalization converts x1/y1/x2/y2 line into points array, and envelope validates.
+5) Rendering stroke scaling: ensure rendered nodes set non-scaling stroke behavior (unit test or snapshot if applicable).
+
+Run:
+- npx vitest run
+and ensure everything passes.
+
+========================
+OUTPUT REQUIRED
+========================
+
+After implementing, provide:
+- Summary of root causes (mapped to A–E above)
+- List of files changed + why
+- How to manually verify:
+  - “draw field” then “move field up” visibly moves
+  - “draw house” commit then “move house up” still moves
+  - “draw sun” never fails schema
+  - field tufts don’t look like huge half circles
+  - “walking towards house” does NOT add indicator line unless asked
