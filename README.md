@@ -1,4 +1,4 @@
-# Replit Vue App
+# InteliCanvas Platfrom - The First AI Driven Drawing Platform
 
 This is a single-port full-stack app using Vue 3 + Vite + TypeScript on the client and Node.js + Express + WebSocket on the server.
 
