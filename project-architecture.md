@@ -1,6 +1,6 @@
 # AI Voice-to-Art Drawing System
 
-Stakeholder architecture overview
+Project architecture overview
 
 ## Executive summary
 
@@ -366,7 +366,7 @@ With explanation:
 
 ## Repo code map
 
-Useful files for technical follow-up:
+Useful  technical files:
 
 - `server/routes.ts`
 - `server/streaming/planGenerator.ts`
