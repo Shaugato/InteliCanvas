@@ -340,9 +340,7 @@ That gives us:
 - product extensibility
 - stronger long-term platform value
 
-## Short speaker script
-
-You can say this in a meeting:
+## In Short
 
 > Our system works like a digital art studio.
 > The user gives a voice or text instruction.
